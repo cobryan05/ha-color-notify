@@ -57,6 +57,7 @@ from .const import (
     CONF_PEEK_ENABLED,
     CONF_PEEK_TIME,
     CONF_PRIORITY,
+    CONF_RESTORE_POWER,
     CONF_RGB_SELECTOR,
     CONF_SUBSCRIPTION,
     DEFAULT_PRIORITY,
@@ -69,6 +70,7 @@ from .const import (
 )
 from .utils.hass_data import HassData
 from .utils.light_sequence import ColorInfo, LightSequence
+from .utils.wrapped_light_state import WrappedLightState
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -243,7 +245,19 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         self._dynamic_priority: bool = self._config_entry.options.get(
             CONF_DYNAMIC_PRIORITY, True
         )
+        self._restore_power: bool = self._config_entry.data.get(
+            CONF_RESTORE_POWER, False
+        )
+        # When restore_power is False, skip worker loop commands to the real
+        # light until the first notification activates. This prevents the
+        # worker loop's base LIGHT_OFF_SEQUENCE from turning off the real
+        # light on startup. Cleared when a notification enters the queue.
+        self._startup_quiet: bool = not self._restore_power
         self._response_expected_expire_time: float = 0.0
+
+        # Track the real wrapped light's state for post-notification restore.
+        # Freeze on notification start, restore from tracked state on clear.
+        self._wrapped_state: WrappedLightState = WrappedLightState()
 
         self._task_queue: asyncio.Queue[_QueueEntry] = asyncio.Queue()
         self._task: asyncio.Task | None = None
@@ -271,6 +285,15 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         # Check if the wrapped entity is valid at startup
         state = self.hass.states.get(self._wrapped_entity_id)
         if state:
+            self._wrapped_state.update(state)
+            _LOGGER.debug(
+                "%s startup: wrapped light %s is %s (brightness=%s, color_mode=%s)",
+                self.name,
+                self._wrapped_entity_id,
+                state.state,
+                state.attributes.get("brightness"),
+                state.attributes.get("color_mode"),
+            )
             await self._handle_wrapped_light_init()
 
         # Subscribe to notifications
@@ -348,10 +371,22 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         if restored_state:
             self._attr_is_on = restored_state.state == STATE_ON
             self.async_schedule_update_ha_state(True)
-            if self.is_on:
-                self.hass.async_create_task(self.async_turn_on())
-            else:
-                self.hass.async_create_task(self.async_turn_off())
+            if self._restore_power:
+                if self.is_on:
+                    self.hass.async_create_task(self.async_turn_on())
+                else:
+                    self.hass.async_create_task(self.async_turn_off())
+            elif self.is_on:
+                # When restore_power is False and light was ON, set the base
+                # sequence to ON so post-notification restore returns to ON
+                # state (not OFF). No commands sent to real light.
+                sequence = replace(
+                    LIGHT_ON_SEQUENCE,
+                    pattern=[ColorInfo(rgb=self._last_on_rgb)],
+                    priority=self._light_on_priority,
+                )
+                self._active_sequences[STATE_ON] = sequence
+                self._sort_active_sequences()
 
     async def async_will_remove_from_hass(self):
         """Clean up before removal from HASS."""
@@ -436,6 +471,32 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             #     if anim is not None
             # ]
             # color = NotificationLightEntity.mix_colors(colors)
+
+            # Check if returning to base state after notification cleared.
+            # Note: LIGHT_ON_SEQUENCE has notify_id=None but is stored with
+            # key STATE_ON in _active_sequences. Check the dict key, not the
+            # sequence's notify_id property.
+            top_key = next(
+                (k for k, v in self._active_sequences.items() if v is top_sequence),
+                None,
+            )
+            is_base = top_key in (STATE_ON, STATE_OFF)
+            if is_base and self._wrapped_state.is_frozen:
+                _LOGGER.debug(
+                    "%s restoring wrapped light (is_on=%s, params=%s)",
+                    self.name,
+                    self._wrapped_state.is_on,
+                    self._wrapped_state.restore_params,
+                )
+                success = await self._restore_wrapped_light()
+                if success:
+                    self._wrapped_state.unfreeze()
+                    self._last_set_color = None
+                    _LOGGER.debug("%s restore complete, unfrozen", self.name)
+                else:
+                    _LOGGER.warning("%s restore failed", self.name)
+                return
+
             color = top_sequence.color
             if color != self._last_set_color:
                 if await self._wrapped_light_turn_on(**color.light_params):
@@ -566,6 +627,19 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
                     # Add the new sequence in, sorted by priority
                     self._active_sequences[item.notify_id] = item.sequence
                     self._sort_active_sequences()
+                    # First notification clears startup quiet — worker loop
+                    # can now send restore commands after notification clears
+                    self._startup_quiet = False
+                    # Freeze tracked state so post-notification restore uses
+                    # the actual pre-notification light state, not WARM_WHITE_RGB
+                    if not self._wrapped_state.is_frozen:
+                        self._wrapped_state.freeze()
+                        _LOGGER.debug(
+                            "%s frozen wrapped state for restore: is_on=%s, params=%s",
+                            self.name,
+                            self._wrapped_state.is_on,
+                            self._wrapped_state.restore_params,
+                        )
 
                 if item.action == ACTION_CYCLE_SAME and self._active_sequences:
                     # Copy the top-priority items in the sequence list.
@@ -672,6 +746,18 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         self, event: Event[EventStateChangedData]
     ) -> None:
         """Handle the underlying wrapped light changing state."""
+        new_state = event.data.get("new_state")
+        if new_state is not None:
+            self._wrapped_state.update(new_state)
+            _LOGGER.debug(
+                "%s wrapped light changed: %s (brightness=%s, color_mode=%s, frozen=%s)",
+                self.name,
+                new_state.state,
+                new_state.attributes.get("brightness"),
+                new_state.attributes.get("color_mode"),
+                self._wrapped_state.is_frozen,
+            )
+
         if event.data["old_state"] is None:
             await self._handle_wrapped_light_init()
         elif time.time() > self._response_expected_expire_time:
@@ -700,6 +786,10 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         """Turn on the underlying wrapped light entity."""
         if kwargs.get(ATTR_RGB_COLOR, []) == OFF_RGB:
             return await self._wrapped_light_turn_off()
+
+        # During startup quiet period, suppress all commands to the real light
+        if self._startup_quiet:
+            return True
 
         if not self._wrapped_init_done:
             _LOGGER.warning(
@@ -735,6 +825,10 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
 
     async def _wrapped_light_turn_off(self, **kwargs: Any) -> bool:
         """Turn off the underlying wrapped light entity."""
+        # During startup quiet period, suppress all commands to the real light
+        if self._startup_quiet:
+            return True
+
         if not self._wrapped_init_done:
             return False
         self._reset_expected_response_timeout()
@@ -745,15 +839,13 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         )
         return True
 
-    @staticmethod
-    def _rgb_to_hs_brightness(
-        r: float, g: float, b: float
-    ) -> tuple[float, float, float]:
-        """Return RGB to HS plus brightness."""
-        h, s, v = color_RGB_to_hsv(r, g, b)
-        # Re-scale 'v' from 0-100 to 0-255
-        v = round((255 / 100) * v)
-        return (h, s, v)
+    async def _restore_wrapped_light(self) -> bool:
+        """Restore the wrapped light to its pre-notification state."""
+        if self._wrapped_state.is_on:
+            params = self._wrapped_state.restore_params
+            return await self._wrapped_light_turn_on(**params)
+        else:
+            return await self._wrapped_light_turn_off()
 
     def _create_sequence_from_attr(
         self, attributes: dict[str, Any], notify_id: str | None = None
@@ -816,7 +908,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         """Handle a toggle service call."""
         # Turn 'on' the light if it is off, or if dynamic priority is enabled and 'on' isn't top.
         if not self.is_on or (
-            self._dynamic_priority and self._get_top_sequence().notify_id != STATE_ON
+            self._dynamic_priority and self._get_top_sequences()[0].notify_id != STATE_ON
         ):
             await self.async_turn_on(**kwargs)
         else:
