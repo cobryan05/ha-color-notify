@@ -745,16 +745,6 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         )
         return True
 
-    @staticmethod
-    def _rgb_to_hs_brightness(
-        r: float, g: float, b: float
-    ) -> tuple[float, float, float]:
-        """Return RGB to HS plus brightness."""
-        h, s, v = color_RGB_to_hsv(r, g, b)
-        # Re-scale 'v' from 0-100 to 0-255
-        v = round((255 / 100) * v)
-        return (h, s, v)
-
     def _create_sequence_from_attr(
         self, attributes: dict[str, Any], notify_id: str | None = None
     ) -> _NotificationSequence:
