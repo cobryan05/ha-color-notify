@@ -58,10 +58,19 @@ ha_light.ColorMode = MagicMock()
 ha_light.ColorMode.COLOR_TEMP = "color_temp"
 class _StubLightEntity:
     _attr_is_on = None
+    _attr_name = None
+    entity_id = None
 
     @property
     def is_on(self):
         return self._attr_is_on
+
+    @property
+    def name(self):
+        return self._attr_name
+
+    async def async_added_to_hass(self):
+        pass
 
 ha_light.LightEntity = _StubLightEntity
 ha_light.DOMAIN = "light"
