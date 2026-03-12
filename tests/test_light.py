@@ -1,7 +1,6 @@
-"""Tests for worker task spawn ordering in async_added_to_hass."""
+"""Tests for async_toggle with dynamic_priority enabled."""
 
 from unittest.mock import AsyncMock, MagicMock
-
 from custom_components.color_notify.light import NotificationLightEntity
 
 
@@ -10,7 +9,17 @@ class FakeState:
         self.state = state
 
 
-def make_entity():
+from custom_components.color_notify.light import (
+    ColorInfo,
+    LIGHT_ON_SEQUENCE,
+    NotificationLightEntity,
+    WARM_WHITE_RGB,
+    _NotificationSequence,
+)
+from custom_components.color_notify.const import DEFAULT_PRIORITY
+
+
+def make_entity(is_on=False):
     entry = MagicMock()
     entry.data = {
         "type": "light",
@@ -18,7 +27,7 @@ def make_entity():
         "entity_id": "light.test",
         "color_picker": [255, 249, 216],
         "dynamic_priority": True,
-        "priority": 1000,
+        "priority": DEFAULT_PRIORITY,
         "delay": True,
         "delay_time": {"seconds": 5},
         "peek_time": {"seconds": 5},
@@ -34,10 +43,13 @@ def make_entity():
         config_entry=entry,
     )
     entity.hass = MagicMock()
+
     entity.hass.states.get.return_value = None
     entity.async_write_ha_state = MagicMock()
     entity.async_schedule_update_ha_state = MagicMock()
-
+    entity.async_turn_on = AsyncMock()
+    entity.async_turn_off = AsyncMock()
+    entity._attr_is_on = is_on
     return entity, entry
 
 
@@ -61,7 +73,9 @@ class TestWorkerSpawnOrder:
 
         await entity.async_added_to_hass()
 
-        assert call_order.index("create_background_task") > call_order.index("get_last_state")
+        assert call_order.index("create_background_task") > call_order.index(
+            "get_last_state"
+        )
 
     async def test_worker_spawns_without_restored_state(self):
         """Background task is created even when there's no restored state."""
@@ -71,3 +85,45 @@ class TestWorkerSpawnOrder:
         await entity.async_added_to_hass()
 
         entry.async_create_background_task.assert_called_once()
+
+
+class TestAsyncToggleDynamicPriority:
+    async def test_toggle_on_when_off(self):
+        """Toggle turns on when entity is off."""
+        entity, entry = make_entity(is_on=False)
+
+        await entity.async_toggle()
+
+        entity.async_turn_on.assert_awaited_once()
+        entity.async_turn_off.assert_not_awaited()
+
+    async def test_toggle_off_when_state_on_is_top(self):
+        """Toggle turns off when entity is on and STATE_ON is top priority."""
+        entity, entry = make_entity(is_on=True)
+        entity._active_sequences["on"] = _NotificationSequence(
+            notify_id="on",
+            pattern=[ColorInfo(WARM_WHITE_RGB, 255)],
+            priority=DEFAULT_PRIORITY,
+        )
+        entity._sort_active_sequences()
+
+        await entity.async_toggle()
+
+        entity.async_turn_off.assert_awaited_once()
+        entity.async_turn_on.assert_not_awaited()
+
+    async def test_toggle_on_when_notification_outranks_state_on(self):
+        """Toggle turns on when a notification outranks STATE_ON."""
+        entity, entry = make_entity(is_on=True)
+        entity._active_sequences["on"] = LIGHT_ON_SEQUENCE
+        entity._active_sequences["alert"] = _NotificationSequence(
+            notify_id="alert",
+            pattern=[ColorInfo((255, 0, 0), 255)],
+            priority=DEFAULT_PRIORITY + 100,
+        )
+        entity._sort_active_sequences()
+
+        await entity.async_toggle()
+
+        entity.async_turn_on.assert_awaited_once()
+        entity.async_turn_off.assert_not_awaited()
