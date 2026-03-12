@@ -57,6 +57,7 @@ from .const import (
     CONF_PEEK_ENABLED,
     CONF_PEEK_TIME,
     CONF_PRIORITY,
+    CONF_RESTORE_POWER,
     CONF_RGB_SELECTOR,
     CONF_SUBSCRIPTION,
     DEFAULT_PRIORITY,
@@ -243,6 +244,9 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         self._dynamic_priority: bool = self._config_entry.options.get(
             CONF_DYNAMIC_PRIORITY, True
         )
+        self._restore_power: bool = self._config_entry.data.get(
+            CONF_RESTORE_POWER, False
+        )
         self._response_expected_expire_time: float = 0.0
 
         self._task_queue: asyncio.Queue[_QueueEntry] = asyncio.Queue()
@@ -340,13 +344,32 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         )
 
         restored_state = await self.async_get_last_state()
-        if restored_state:
-            self._attr_is_on = restored_state.state == STATE_ON
-            self.async_schedule_update_ha_state(True)
-            if self.is_on:
-                self.hass.async_create_task(self.async_turn_on())
-            else:
-                self.hass.async_create_task(self.async_turn_off())
+        if self._restore_power:
+            # Power recovery mode: use cached state and send commands to real light
+            if restored_state:
+                self._attr_is_on = restored_state.state == STATE_ON
+                self._seed_from_state(restored_state)
+                self.async_schedule_update_ha_state(True)
+                if self.is_on:
+                    self.hass.async_create_task(self.async_turn_on())
+                else:
+                    self.hass.async_create_task(self.async_turn_off())
+        else:
+            # Transparent mode (default): read the real light's actual state
+            wrapped_state = self.hass.states.get(self._wrapped_entity_id)
+            if wrapped_state:
+                self._attr_is_on = wrapped_state.state == STATE_ON
+                self._seed_from_state(wrapped_state)
+            elif restored_state:
+                self._attr_is_on = restored_state.state == STATE_ON
+                self._seed_from_state(restored_state)
+            if self._attr_is_on is not None:
+                self.async_schedule_update_ha_state(True)
+
+        # Spawn the worker task after state restore to avoid racing with init
+        self._task = self._config_entry.async_create_background_task(
+            self.hass, self._worker_func(), name=f"{self.name} background task"
+        )
 
         # Spawn the worker function background task to manage this bulb.
         # This must happen after state restore to avoid racing with initialization.
@@ -641,6 +664,18 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         self._last_set_color = None
         await self._wake_loop()
 
+    def _seed_from_state(self, state: object) -> None:
+        """Seed _last_on_rgb and _last_brightness from a state object."""
+        if state is None:
+            return
+        attrs = state.attributes if hasattr(state, "attributes") else {}
+        rgb = attrs.get(ATTR_RGB_COLOR)
+        if rgb:
+            self._last_on_rgb = tuple(rgb)
+        brightness = attrs.get(ATTR_BRIGHTNESS)
+        if brightness:
+            self._last_brightness = int(brightness)
+
     def _reset_expected_response_timeout(self):
         self._response_expected_expire_time = (
             time.time() + EXPECTED_SERVICE_CALL_TIMEOUT
@@ -676,11 +711,27 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         if event.data["old_state"] is None:
             await self._handle_wrapped_light_init()
         elif time.time() > self._response_expected_expire_time:
-            _LOGGER.warning(
-                "%s received unexpected event %s", self.entity_id, str(event.data)
-            )
-            # Current state is unknown, just reset
-            await self._reset_running_sequences()
+            # External change detected (outside our response window)
+            top_sequences = self._get_top_sequences()
+            top = top_sequences[0] if top_sequences else None
+            if top and top.notify_id in (STATE_ON, STATE_OFF):
+                # No active notification - accept the change, stay transparent
+                new_state = event.data["new_state"]
+                if new_state:
+                    _LOGGER.debug(
+                        "%s accepting external change", self.entity_id
+                    )
+                    self._seed_from_state(new_state)
+                    self._attr_is_on = new_state.state == STATE_ON
+                    self._last_set_color = None
+                    self.async_write_ha_state()
+            else:
+                # Active notification - reset sequences (existing behavior)
+                _LOGGER.debug(
+                    "%s external change during notification, resetting",
+                    self.entity_id,
+                )
+                await self._reset_running_sequences()
 
     async def _handle_wrapped_light_init(self) -> None:
         """Handle wrapped light entity initializing."""

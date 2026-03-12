@@ -21,6 +21,7 @@ CONF_ENTRY: Final = "entry"
 CONF_PEEK_TIME: Final = "peek_time"
 CONF_PEEK_ENABLED: Final = "peek_enabled"
 CONF_DYNAMIC_PRIORITY: Final = "dynamic_priority"
+CONF_RESTORE_POWER: Final = "restore_power"
 
 ACTION_CYCLE_SAME: Final = "cycle_same"
 

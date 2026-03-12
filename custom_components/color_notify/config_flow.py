@@ -36,6 +36,7 @@ from .const import (
     CONF_DELETE,
     CONF_DYNAMIC_PRIORITY,
     CONF_EXPIRE_ENABLED,
+    CONF_RESTORE_POWER,
     CONF_NOTIFY_PATTERN,
     CONF_NTFCTN_ENTRIES,
     CONF_PEEK_ENABLED,
@@ -107,6 +108,7 @@ ADD_LIGHT_DEFAULTS = {
     CONF_DELAY: True,
     CONF_DELAY_TIME: {"seconds": 5},
     CONF_PEEK_TIME: {"seconds": 5},
+    CONF_RESTORE_POWER: False,
 }
 ADD_LIGHT_SCHEMA = vol.Schema(
     {
@@ -134,6 +136,9 @@ ADD_LIGHT_SCHEMA = vol.Schema(
         vol.Optional(
             CONF_PEEK_TIME, default=ADD_LIGHT_DEFAULTS[CONF_PEEK_TIME]
         ): selector.DurationSelector(selector.DurationSelectorConfig()),
+        vol.Optional(
+            CONF_RESTORE_POWER, default=ADD_LIGHT_DEFAULTS[CONF_RESTORE_POWER]
+        ): cv.boolean,
     }
 )
 

@@ -30,7 +30,8 @@
           "dynamic_priority": "Dynamic 'On' Priority (inherit active light priority + 0.5 when switched on)",
           "peek_time": "Duration to temporarily display lower-priority notifications",
           "delay": "Auto-cycle between same priority notifications",
-          "delay_time": "Auto-cycle delay"
+          "delay_time": "Auto-cycle delay",
+          "restore_power": "Restore power state on startup (sends turn on/off to wrapped light)"
         }
       },
       "reconfigure_light": {
@@ -43,7 +44,8 @@
           "dynamic_priority": "Dynamic 'On' Priority (inherit active light priority + 0.5 when switched on)",
           "peek_time": "Duration to temporarily display lower-priority notifications",
           "delay": "Auto-cycle between same priority notifications",
-          "delay_time": "Auto-cycle delay"
+          "delay_time": "Auto-cycle delay",
+          "restore_power": "Restore power state on startup (sends turn on/off to wrapped light)"
         }
       }
     }
@@ -127,7 +129,8 @@
           "dynamic_priority": "Dynamic 'On' Priority (inherit active light priority + 0.5 when switched on)",
           "peek_time": "Duration to temporarily display lower-priority notifications",
           "delay": "Auto-cycle between same priority notifications",
-          "delay_time": "Auto-cycle delay"
+          "delay_time": "Auto-cycle delay",
+          "restore_power": "Restore power state on startup (sends turn on/off to wrapped light)"
         }
       }
     }
