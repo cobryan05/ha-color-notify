@@ -263,11 +263,6 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         # Add the 'OFF' sequence so the list isn't empty
         self._active_sequences[STATE_OFF] = LIGHT_OFF_SEQUENCE
 
-        # Spawn the worker function background task to manage this bulb
-        self._task = self._config_entry.async_create_background_task(
-            self.hass, self._worker_func(), name=f"{self.name} background task"
-        )
-
         # Check if the wrapped entity is valid at startup
         state = self.hass.states.get(self._wrapped_entity_id)
         if state:
@@ -352,6 +347,12 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
                 self.hass.async_create_task(self.async_turn_on())
             else:
                 self.hass.async_create_task(self.async_turn_off())
+
+        # Spawn the worker function background task to manage this bulb.
+        # This must happen after state restore to avoid racing with initialization.
+        self._task = self._config_entry.async_create_background_task(
+            self.hass, self._worker_func(), name=f"{self.name} background task"
+        )
 
     async def async_will_remove_from_hass(self):
         """Clean up before removal from HASS."""
