@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections.abc import Callable, Coroutine
 from copy import copy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import timedelta
 from functools import cached_property
 import logging
@@ -206,6 +206,7 @@ LIGHT_OFF_SEQUENCE = _NotificationSequence(
     priority=0,
 )
 LIGHT_ON_SEQUENCE = _NotificationSequence(
+    notify_id=STATE_ON,
     pattern=[ColorInfo(WARM_WHITE_RGB, 255)],
     priority=DEFAULT_PRIORITY,
 )
@@ -790,9 +791,9 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             priority = max(priority, self._get_top_sequences()[0].priority) + 0.5
 
         self._last_on_rgb = rgb
-        sequence = replace(
-            LIGHT_ON_SEQUENCE, pattern=[ColorInfo(rgb=rgb)], priority=priority
-        )
+        sequence = copy(LIGHT_ON_SEQUENCE)
+        sequence.pattern = [ColorInfo(rgb=rgb)]
+        sequence.priority = priority
 
         await self._add_sequence(STATE_ON, sequence)
         self.async_write_ha_state()
