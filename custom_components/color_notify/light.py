@@ -791,9 +791,11 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             priority = max(priority, self._get_top_sequences()[0].priority) + 0.5
 
         self._last_on_rgb = rgb
-        sequence = copy(LIGHT_ON_SEQUENCE)
-        sequence.pattern = [ColorInfo(rgb=rgb)]
-        sequence.priority = priority
+        sequence = _NotificationSequence(
+            pattern=[ColorInfo(rgb=rgb)],
+            priority=priority,
+            notify_id=STATE_ON,
+        )
 
         await self._add_sequence(STATE_ON, sequence)
         self.async_write_ha_state()
