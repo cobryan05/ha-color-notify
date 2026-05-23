@@ -343,6 +343,10 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         restored_state = await self.async_get_last_state()
         if restored_state:
             self._attr_is_on = restored_state.state == STATE_ON
+            if rgb := restored_state.attributes.get(ATTR_RGB_COLOR):
+                self._last_on_rgb = tuple(rgb)
+            if brightness := restored_state.attributes.get(ATTR_BRIGHTNESS):
+                self._last_brightness = int(brightness)
             self.async_schedule_update_ha_state(True)
             if self.is_on:
                 self.hass.async_create_task(self.async_turn_on())
@@ -791,9 +795,11 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             priority = max(priority, self._get_top_sequences()[0].priority) + 0.5
 
         self._last_on_rgb = rgb
-        sequence = copy(LIGHT_ON_SEQUENCE)
-        sequence.pattern = [ColorInfo(rgb=rgb)]
-        sequence.priority = priority
+        sequence = _NotificationSequence(
+            pattern=[ColorInfo(rgb=rgb)],
+            priority=priority,
+            notify_id=STATE_ON,
+        )
 
         await self._add_sequence(STATE_ON, sequence)
         self.async_write_ha_state()

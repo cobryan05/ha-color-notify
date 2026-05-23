@@ -1,22 +1,22 @@
-"""Tests for async_toggle with dynamic_priority enabled."""
+"""Tests for color_notify light entity behavior."""
 
-from unittest.mock import AsyncMock, MagicMock
-from custom_components.color_notify.light import NotificationLightEntity
-
-
-class FakeState:
-    def __init__(self, state: str):
-        self.state = state
-
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.color_notify.light import (
     ColorInfo,
+    LIGHT_OFF_SEQUENCE,
     LIGHT_ON_SEQUENCE,
     NotificationLightEntity,
     WARM_WHITE_RGB,
     _NotificationSequence,
 )
 from custom_components.color_notify.const import DEFAULT_PRIORITY
+
+
+class FakeState:
+    def __init__(self, state: str):
+        self.state = state
 
 
 def make_entity(is_on=False):
@@ -34,7 +34,12 @@ def make_entity(is_on=False):
     }
     entry.options = {}
     entry.title = "[Light] Test Light"
-    entry.async_create_background_task = MagicMock()
+    def _close_coros(*args, **kwargs):
+        for arg in args:
+            if asyncio.iscoroutine(arg):
+                arg.close()
+
+    entry.async_create_background_task = MagicMock(side_effect=_close_coros)
     entry.async_on_unload = MagicMock()
 
     entity = NotificationLightEntity(
@@ -67,6 +72,9 @@ class TestWorkerSpawnOrder:
 
         def tracked_create_background_task(*args, **kwargs):
             call_order.append("create_background_task")
+            for arg in args:
+                if asyncio.iscoroutine(arg):
+                    arg.close()
 
         entity.async_get_last_state = tracked_get_last_state
         entry.async_create_background_task = tracked_create_background_task
@@ -127,3 +135,62 @@ class TestAsyncToggleDynamicPriority:
 
         entity.async_turn_on.assert_awaited_once()
         entity.async_turn_off.assert_not_awaited()
+
+
+class TestNotificationSequenceColor:
+    def test_sequence_initial_color_matches_pattern(self) -> None:
+        """A _NotificationSequence constructed with a pattern uses that pattern's color."""
+        red = ColorInfo(rgb=(255, 0, 0), brightness=255)
+        seq = _NotificationSequence(
+            pattern=[red], priority=DEFAULT_PRIORITY, notify_id="on"
+        )
+        assert seq.color.rgb == (255, 0, 0)
+
+
+class TestTurnOnColorBrightness:
+    def _make_entity(self) -> tuple[NotificationLightEntity, MagicMock]:
+        """Entity with real async_turn_on and the OFF sequence pre-loaded."""
+        entity, entry = make_entity()
+        del entity.async_turn_on
+        del entity.async_turn_off
+        entity._active_sequences["off"] = LIGHT_OFF_SEQUENCE
+        return entity, entry
+
+    async def test_turn_on_with_rgb_color_creates_sequence_with_that_color(self) -> None:
+        """async_turn_on(rgb_color=X) queues a sequence whose color matches X."""
+        entity, _entry = self._make_entity()
+        captured: list[_NotificationSequence] = []
+
+        async def capture_add(notify_id: str, sequence: _NotificationSequence) -> None:
+            captured.append(sequence)
+
+        entity._add_sequence = capture_add
+
+        with (
+            patch("custom_components.color_notify.light.color_RGB_to_hsv", return_value=(0, 100, 100)),
+            patch("custom_components.color_notify.light.color_hsv_to_RGB", return_value=(255, 0, 0)),
+        ):
+            await entity.async_turn_on(rgb_color=(255, 0, 0))
+
+        assert len(captured) == 1
+        assert captured[0].color.rgb == (255, 0, 0)
+
+    async def test_turn_on_with_brightness_creates_sequence_with_dimmed_color(self) -> None:
+        """async_turn_on(brightness=128) queues a sequence with a ~50% dimmed color."""
+        entity, _entry = self._make_entity()
+        entity._last_on_rgb = (255, 0, 0)
+        captured: list[_NotificationSequence] = []
+
+        async def capture_add(notify_id: str, sequence: _NotificationSequence) -> None:
+            captured.append(sequence)
+
+        entity._add_sequence = capture_add
+
+        with (
+            patch("custom_components.color_notify.light.color_RGB_to_hsv", return_value=(0, 100, 100)),
+            patch("custom_components.color_notify.light.color_hsv_to_RGB", return_value=(127, 0, 0)),
+        ):
+            await entity.async_turn_on(brightness=128)
+
+        assert len(captured) == 1
+        assert captured[0].color.rgb == (127, 0, 0)
