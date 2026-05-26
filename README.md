@@ -1,114 +1,97 @@
-<h1 align="center">
-  <a name="logo" href="https://github.com/cobryan05/ha-color-notify"><img src="https://raw.githubusercontent.com/cobryan05/ha-color-notify/refs/heads/main/images/logo.png?raw=true" alt="Color Notify!" width="200"></a>
-  <br/>
-  Color Notify!
-  <br/>
-  RGB Light Notification Manager
-</h1>
-<h2 align="center">
-This integration provides priority-based, colored event notifications for Home Assistant light entities.<br/>
-It wraps an existing light and creates a new entity that supports colored and animated notifications.
-</h2>
+#
+[![Color Notify!](https://raw.githubusercontent.com/cobryan05/ha-color-notify/refs/heads/main/images/logo.png?raw=true)](https://github.com/cobryan05/ha-color-notify)
+
+# Color Notify!
+### Intelligent, Priority-Based RGB Light Notifications for Home Assistant
+
+**Color Notify** transforms your standard smart lights into dynamic, priority-driven notification displays. By wrapping an existing light entity into a feature-rich virtual wrapper, it seamlessly coordinates complex visual alerts, color patterns, and loops without breaking standard day-to-day lighting controls.
 
 ---
 
-## Overview
+## Key Features
 
-**Color Notify** enables you to wrap an existing light entity and configure customizable, colorful notifications that display on the light. Notifications are prioritized and managed automatically, so only the highest-priority notification is shown. Standard light functions (on/off, brightness, color) are fully supported, even with notifications active.
-
-## Features
-
-- **Toggleable Notifications**: Notifications are represented as Switch entities. Simply turn on and off notifications an ColorNotifiy will sort out showing it on the appropriate lights.
-- **Subscription-based Notifications**: Create notifications in "pools". Multiple pools can be created each containing multiple notiifcations, and wrapped lights can subscribe to each individual notification or entire pools at once.
-- **Priority-based Notifications**: Assign a priority to each notification, so only the highest-priority active notification is shown. Lower-priority notifications can optionally temporarily display when activated.
-- **Standard Light Control**: The wrapped light can continue to be used as a normal light, with on/off and color controls, just use the created wrapper light entity anywhere in place of the 'real' light entity.
-- **Customizable Colors and Effects**: Configure colors, brightness levels, and animations for each notification. Animations can include loops and timed steps for complex sequences.
+* **🎛️ Toggleable Alerts as Switches:** Every notification you create is exposed to Home Assistant as a native `switch` entity. Automating an alert is as simple as flipping a switch.
+* **📦 Notification Pools & Subscriptions:** Group notifications into flexible "pools" (e.g., *Security*, *Appliances*). Individual light wrappers can subscribe to an entire pool or specific alerts, allowing a single trigger to sync across multiple rooms.
+* **🚦 Intelligent Priority Queueing:** Assign weights to alerts so that critical notifications (like a security alarm) immediately override low-priority status indicators (like a finished laundry cycle).
+* **🔄 Seamless Light Control Passthrough:** Your wrapped light still acts as a normal light. Standard on/off, brightness, and color adjustments work right out of the box. Color Notify manages the background states so your regular smart light routines don't break.
+* **🎨 Sophisticated Patterns & Animations:** Move beyond boring solid colors. Build complex, looping sequences with custom RGB values, precise delays, and recurring step blocks.
 
 ---
 
 ## Installation
 
-### Manual Installation
-1. Copy the integration files to `custom_components/ha-color-notify` in your Home Assistant configuration.
-2. Restart Home Assistant.
+### Method 1: HACS (Recommended)
+*Note: Color Notify is included in the default HACS repositories.*
 
-### HACS Installation 
-*(Color Notify is now a default HACS repo so step #1 should be unnecessary)*
-1. Add `https://github.com/cobryan05/ha-color-notify` as a custom repository in HACS (select type "Integration")
-2. Search for Color Notify in HACS and download it.
-2. Restart Home Assistant.
+1. Open **HACS** in your Home Assistant instance.
+2. Search for **Color Notify** under the **Integrations** section and download it.
+3. Restart Home Assistant.
 
-### Adding the Integration
-After installation, go to **Settings > Integrations**, click **Add Integration**, search for **Color Notify**, and follow the prompts to set up your first notification-enabled light entity.
+### Method 2: Manual Installation
+1. Download the repository ZIP file.
+2. Extract and copy the integration files into your Home Assistant configuration directory under `custom_components/ha-color-notify`.
+3. Restart Home Assistant.
+
+### Initial Setup
+After restarting, navigate to **Settings > Devices & Services** > **Add Integration**, search for **Color Notify**, and follow the setup prompts.
 
 ---
 
 ## Configuration
 
-When adding a ColorNotify integration you can select to create a new Light or a new Notification Pool. Once created each integration can be further customized by using the "Configure' button on the integration.
+Color Notify operates on two main configuration types: **Lights** (the virtual wrappers) and **Notification Pools** (the collections of alerts).
 
-Notification Pools can be 'configured' to add/remove/modify notifications within that pool.
+Once added, you can modify either configuration at any time by clicking the **Configure** button on the integration card.
 
-Lights can be 'configured' to update light options or subscribe a light to new notifications
+### 1. Setting up a New Light Wrapper
 
-### Setting up a New Light Entity
+To enhance a physical light, add a new Color Notify light instance or click **Add Hub** on the integration panel and select an existing light to wrap.
 
-Set up a new light entity by adding a new Color Notify integration, or clicking "Add Hub" when on the Color Notifiy integration settings page.
-When setting up a new Color Notify light entity, select an existing light to wrap. This will create a new entity with enhanced notification capabilities. Use this new entity in place of the original light for notification functionality. ***Color Notify will fight any changes you make to the 'real' bulb. Only interact with the new 'wrapper' entity!***
+> ⚠️ **Important:** Once wrapped, always interact with the new **Color Notify wrapper light** entity instead of the underlying physical light. Color Notify continuously manages the hardware state; controlling the raw bulb directly will cause conflicting behavior.
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/cobryan05/ha-color-notify/refs/heads/main/images/new_light_settings.png?raw=true" alt="New Light Setup Example" width="60%">
-</p>
+[![New Light Setup Example](https://raw.githubusercontent.com/cobryan05/ha-color-notify/refs/heads/main/images/new_light_settings.png?raw=true)](https://raw.githubusercontent.com/cobryan05/ha-color-notify/refs/heads/main/images/new_light_settings.png?raw=true)
 
 #### Light Options
-
-- **Dynamic 'On' Priority**: When enabled, turning on the light directly will set it to a priority slightly above any active notifications, ensuring the light state overrides.
-- **Auto-cycle Between Same-priority Notifications**: If multiple notifications have the same priority, they will cycle automatically. Use the delay setting to define how long each notification displays.
-- **Temporary Display of Lower-priority Notifications**: When a new notification is activated, it can temporarily display regardless of its priority. Set the duration for this temporary display or disable it by setting it to 0.
+* **Dynamic 'On' Priority:** When enabled, manually turning on the wrapper light temporarily overrides any active notifications by forcing the light state to a priority level just above the active alerts.
+* **Auto-cycle Between Same-priority Notifications:** If multiple notifications with identical priorities are active simultaneously, the light will automatically cycle through them based on a customizable delay.
+* **Temporary Display of Lower-priority Notifications:** Allows a lower-priority alert to briefly interrupt a higher-priority one when first triggered. Set the duration in seconds (or set to `0` to disable).
 
 ---
 
-### Configuring Notifications
+### 2. Configuring Notifications & Patterns
 
-Notifications can be customized with colors, priorities, and display patterns. Priorities control which notification is displayed if multiple are active.
+Notifications are organized into pools and customized with priorities, lifetimes, and behavioral patterns.
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/cobryan05/ha-color-notify/refs/heads/main/images/notification_options.png?raw=true" alt="Notification Configuration Example" width="60%">
-</p>
+[![Notification Configuration Example](https://raw.githubusercontent.com/cobryan05/ha-color-notify/refs/heads/main/images/notification_options.png?raw=true)](https://raw.githubusercontent.com/cobryan05/ha-color-notify/refs/heads/main/images/notification_options.png?raw=true)
 
 #### Notification Options
-
-- **Priority**: Determines the notification’s display priority.
-- **Temporary Display on Activation**: Forces the notification to display briefly upon activation, even if it’s lower priority.
-- **Automatic Clear After Timeout**: Automatically turns off the notification after a set timeout. The timeout timer starts as soon as the notification begins. A timeout of '0' will auto-clear immediately after the pattern finishes.
-- **Color**: Sets a solid color for the notification.
-- **Pattern**: Allows complex animations with sequences of colors and delays.
-  - **Loop**: Use `[` to start and `], loopcnt` to end a loop (e.g., `], 5` for five repetitions).
-  - **Step**: Each step includes `"rgb": [R,G,B]` for color and `"delay": seconds` for duration (e.g., `{"rgb": [255,0,0], "delay": 0.5}` for red for 0.5 seconds).
+* **Priority:** Numerical ranking determining which active notification takes visual precedence.
+* **Temporary Display on Activation:** Forces the notification to briefly take over the light upon activation, regardless of its priority ranking.
+* **Automatic Clear After Timeout:** Automatically turns off the notification switch after a set duration. A timeout value of `0` will automatically clear the switch immediately after the animation pattern completes its run.
+* **Color:** Applies a static, solid RGB color to the notification.
+* **Pattern:** Build complex animations using a sequence of JSON steps containing colors and delays:
+  * **Loops:** Use `[` to open a loop and `], loopcnt` to close and define its repetitions (e.g., `], 5` runs that segment five times).
+  * **Steps:** Format individual color blocks with RGB values and duration in seconds (e.g., `{"rgb": [255,0,0], "delay": 0.5}` flashes red for half a second).
 
 ---
 
 ## Usage
 
-Set up a new notification pool (a collection of notifications) by adding a new Color Notify integration, or clicking "Add Hub" when on the Color Notify integration settings page.
+1. Create a **Notification Pool** to host your custom alert profiles.
+2. Edit your **Light Wrapper** settings to subscribe it to individual alerts or entire notification pools.
+3. Trigger an alert from an automation, script, or dashboard by simply turning on the respective `switch` entity.
 
-To add new notifications 'configure' a notification pool.
-
-To change the notification a light is subscribed to 'configure' the light.
-
-To activate a notification, simply switch on the desired notification’s switch entity.
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/cobryan05/ha-color-notify/refs/heads/main/images/subscriptions.png?raw=true" alt="Light Subscription Example" width="60%">
-</p>
-
-
-## TODO
-
-- Separate RGB and brightness controls for animations.
-- Add services for notification management (e.g., clear notifications, cycle notifications).
-- Fade control, non-RGB configs (hsv, color temp)
+[![Light Subscription Example](https://raw.githubusercontent.com/cobryan05/ha-color-notify/refs/heads/main/images/subscriptions.png?raw=true)](https://raw.githubusercontent.com/cobryan05/ha-color-notify/refs/heads/main/images/subscriptions.png?raw=true)
 
 ---
 
-Enjoy using **Color Notify** for enhanced visual notifications in Home Assistant!
+## Roadmap / TODO
+
+* [ ] Separate RGB and brightness controls specifically for animation profiles.
+* [ ] Introduce native Home Assistant service calls for fine-grained management (e.g., clearing notifications, manual cycle forcing).
+* [ ] Implement transition fade controls.
+* [ ] Support non-RGB lighting configurations (HSV, Color Temperature).
+
+---
+
+Enjoy utilizing **Color Notify** to bring intuitive, high-visibility visual feedback to your smart home environment!
