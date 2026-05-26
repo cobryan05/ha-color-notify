@@ -66,7 +66,7 @@
           "name": "Name for notification",
           "expire_enabled": "Automatically clear after timeout?",
           "delay_time": "Auto-clear timeout",
-          "pattern": "'[' or '], loopcnt' or '{\"rgb\": [255,0,0], \"delay\": 1.5}'",
+          "pattern": "eg, '[' or '], loopcnt' or '{{\"rgb\": [255,0,0], \"delay\": 1.5}}'",
           "color_picker": "Select a solid color, or use '+Add' to create a pattern",
           "peek_enabled": "Temporarily show on activation, regardless of priority.",
           "unique_id": ""
@@ -90,7 +90,7 @@
           "name": "Name for notification",
           "expire_enabled": "Automatically clear after timeout?",
           "delay_time": "Auto-clear timeout",
-          "pattern": "eg, '[' or '], loopcnt' or '{\"rgb\": [255,0,0], \"delay\": 1.5}'",
+          "pattern": "eg, '[' or '], loopcnt' or '{{\"rgb\": [255,0,0], \"delay\": 1.5}}'",
           "color_picker": "Select a solid color, or use '+Add' to create a pattern",
           "peek_enabled": "Temporarily show on activation, regardless of priority.",
           "unique_id": ""
