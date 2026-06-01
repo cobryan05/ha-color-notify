@@ -52,6 +52,15 @@ def _make_mock_logger():
     return logger
 
 
+def _seed_active_seq(entity, notify_id, priority=100):
+    """Insert a dummy active sequence for notify_id into entity._active_sequences."""
+    entity._active_sequences[notify_id] = _NotificationSequence(
+        notify_id=notify_id,
+        pattern=[ColorInfo((255, 0, 0), 255)],
+        priority=priority,
+    )
+
+
 # ---------------------------------------------------------------------------
 # ColorNotifyLogEntity unit tests
 # ---------------------------------------------------------------------------
@@ -414,7 +423,22 @@ class TestHandleStateChangeEventLog:
         assert f"pri 500" in item.log_trigger
 
     async def test_notification_removed_trigger_includes_friendly_name(self):
-        """Disabling a notification places a trigger with the friendly name in the queue."""
+        """Disabling an active notification logs the friendly name and 'disabled'."""
+        entity, _ = _make_light_entity()
+
+        notify_id = "switch.fire_alert"
+        _seed_active_seq(entity, notify_id)
+
+        await entity._handle_notification_change(
+            self._make_event(notify_id, STATE_OFF, {"friendly_name": "Fire Alert"})
+        )
+
+        item = entity._task_queue.get_nowait()
+        assert "Fire Alert" in item.log_trigger
+        assert "disabled" in item.log_trigger
+
+    async def test_notification_disabled_at_boot_skips_log(self):
+        """A notification that is off at boot (never active) produces no queue entry."""
         entity, _ = _make_light_entity()
 
         notify_id = "switch.fire_alert"
@@ -423,10 +447,7 @@ class TestHandleStateChangeEventLog:
             self._make_event(notify_id, STATE_OFF, {"friendly_name": "Fire Alert"})
         )
 
-        item = entity._task_queue.get_nowait()
-        assert item.log_trigger is not None
-        assert "Fire Alert" in item.log_trigger
-        assert "disabled" in item.log_trigger
+        assert entity._task_queue.empty()
 
     async def test_notification_removed_trigger_uses_natural_priority(self):
         """Disabled trigger uses the natural (un-boosted) priority even when sequence is peeking."""
@@ -435,13 +456,8 @@ class TestHandleStateChangeEventLog:
         entity, _ = _make_light_entity()
         notify_id = "switch.fire_alert"
 
-        # Simulate a sequence that is currently in the active list with a peek boost.
-        seq = _NotificationSequence(
-            notify_id=notify_id,
-            pattern=[ColorInfo((255, 0, 0), 255)],
-            priority=100 + MAXIMUM_PRIORITY,  # boosted; natural = 100
-        )
-        entity._active_sequences[notify_id] = seq
+        # Simulate a sequence that is currently peek-boosted; natural priority is 100.
+        _seed_active_seq(entity, notify_id, priority=100 + MAXIMUM_PRIORITY)
 
         await entity._handle_notification_change(
             self._make_event(notify_id, STATE_OFF, {"friendly_name": "Fire Alert"})
@@ -469,6 +485,7 @@ class TestHandleStateChangeEventLog:
         entity, _ = _make_light_entity()
 
         notify_id = "switch.unnamed"
+        _seed_active_seq(entity, notify_id)
 
         await entity._handle_notification_change(self._make_event(notify_id, STATE_OFF))
 

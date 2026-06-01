@@ -763,9 +763,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
                 p = existing_seq.priority
                 natural = p - MAXIMUM_PRIORITY if p > MAXIMUM_PRIORITY else p
                 log_trigger = f"{friendly} (pri {natural}) disabled"
-            else:
-                log_trigger = f"{friendly} disabled"
-            await self._remove_sequence(notify_id, log_trigger=log_trigger)
+                await self._remove_sequence(notify_id, log_trigger=log_trigger)
 
     async def _handle_wrapped_light_change(
         self, event: Event[EventStateChangedData]
