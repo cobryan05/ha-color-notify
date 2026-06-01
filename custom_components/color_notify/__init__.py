@@ -8,7 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_TYPE, Platform
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_ENTRY, TYPE_LIGHT, TYPE_POOL
+from .const import CONF_ENABLE_EVENT_LOG, CONF_ENTRY, CONF_LOADED_PLATFORMS, TYPE_LIGHT, TYPE_POOL
 from .utils.hass_data import HassData
 
 _LOGGER = logging.getLogger(__name__)
@@ -27,7 +27,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     ok = True
     item_type = entry.data.get(CONF_TYPE, None)
     if item_type == TYPE_LIGHT:
+        # Light must be set up first: it creates the log entity and stores it
+        # in runtime_data so the sensor platform can retrieve it.
         await hass.config_entries.async_forward_entry_setups(entry, [Platform.LIGHT])
+        loaded_platforms: list[Platform] = [Platform.LIGHT]
+        enable_log = entry.options.get(
+            CONF_ENABLE_EVENT_LOG,
+            entry.data.get(CONF_ENABLE_EVENT_LOG, True),
+        )
+        if enable_log:
+            await hass.config_entries.async_forward_entry_setups(
+                entry, [Platform.SENSOR]
+            )
+            loaded_platforms.append(Platform.SENSOR)
+        HassData.get_config_entry_runtime_data(entry.entry_id)[
+            CONF_LOADED_PLATFORMS
+        ] = loaded_platforms
         entry.async_on_unload(entry.add_update_listener(handle_config_updated))
     elif item_type == TYPE_POOL:
         # Register to reload config if options flow updates it
@@ -49,7 +64,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     item_type = entry.data.get(CONF_TYPE, None)
     if item_type == TYPE_LIGHT:
-        await hass.config_entries.async_unload_platforms(entry, [Platform.LIGHT])
+        runtime_data = HassData.get_config_entry_runtime_data(entry.entry_id)
+        platforms = runtime_data.get(CONF_LOADED_PLATFORMS, [Platform.LIGHT])
+        await hass.config_entries.async_unload_platforms(entry, platforms)
     elif item_type == TYPE_POOL:
         await hass.config_entries.async_unload_platforms(entry, [Platform.SWITCH])
     else:

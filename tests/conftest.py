@@ -9,6 +9,7 @@ HA_MODULES = [
     "homeassistant",
     "homeassistant.components",
     "homeassistant.components.light",
+    "homeassistant.components.sensor",
     "homeassistant.components.switch",
     "homeassistant.config_entries",
     "homeassistant.const",
@@ -80,6 +81,27 @@ ha_switch.DOMAIN = "switch"
 
 ha_restore = sys.modules["homeassistant.helpers.restore_state"]
 ha_restore.RestoreEntity = type("RestoreEntity", (), {})
+
+
+class _StubRestoreSensor:
+    """Minimal stub for homeassistant.components.sensor.RestoreSensor."""
+
+    hass = None
+    _attr_native_value = None
+    _attr_should_poll = False
+
+    async def async_added_to_hass(self):
+        pass
+
+    async def async_get_last_sensor_data(self):
+        return None
+
+    def async_write_ha_state(self):
+        pass
+
+
+ha_sensor = sys.modules["homeassistant.components.sensor"]
+ha_sensor.RestoreSensor = _StubRestoreSensor
 
 ha_core = sys.modules["homeassistant.core"]
 ha_core.callback = lambda f: f

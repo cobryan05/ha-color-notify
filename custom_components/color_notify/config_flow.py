@@ -32,9 +32,10 @@ from homeassistant.helpers import entity_registry as er, selector
 import homeassistant.helpers.config_validation as cv
 
 from .const import (
-    CONF_ENTRY,
     CONF_DELETE,
     CONF_DYNAMIC_PRIORITY,
+    CONF_ENABLE_EVENT_LOG,
+    CONF_ENTRY,
     CONF_EXPIRE_ENABLED,
     CONF_NOTIFY_PATTERN,
     CONF_NTFCTN_ENTRIES,
@@ -107,6 +108,7 @@ ADD_LIGHT_DEFAULTS = {
     CONF_DELAY: True,
     CONF_DELAY_TIME: {"seconds": 5},
     CONF_PEEK_TIME: {"seconds": 5},
+    CONF_ENABLE_EVENT_LOG: True,
 }
 ADD_LIGHT_SCHEMA = vol.Schema(
     {
@@ -134,6 +136,9 @@ ADD_LIGHT_SCHEMA = vol.Schema(
         vol.Optional(
             CONF_PEEK_TIME, default=ADD_LIGHT_DEFAULTS[CONF_PEEK_TIME]
         ): selector.DurationSelector(selector.DurationSelectorConfig()),
+        vol.Required(
+            CONF_ENABLE_EVENT_LOG, default=ADD_LIGHT_DEFAULTS[CONF_ENABLE_EVENT_LOG]
+        ): cv.boolean,
     }
 )
 
@@ -528,7 +533,58 @@ class LightOptionsFlowHandler(HassDataOptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Launch the options flow."""
-        return await self.async_step_subscriptions(user_input)
+        return self.async_show_menu(
+            step_id="light_init",
+            menu_options=["light_options", "subscriptions"],
+        )
+
+    async def async_step_light_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show and save the configurable light settings."""
+        if user_input is not None:
+            return await self._async_trigger_conf_update(
+                data=self._config_entry.options
+                | {
+                    CONF_ENABLE_EVENT_LOG: user_input[CONF_ENABLE_EVENT_LOG],
+                    CONF_DYNAMIC_PRIORITY: user_input[CONF_DYNAMIC_PRIORITY],
+                    CONF_PRIORITY: user_input[CONF_PRIORITY],
+                }
+            )
+
+        current = self._config_entry
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_ENABLE_EVENT_LOG,
+                    default=current.options.get(
+                        CONF_ENABLE_EVENT_LOG,
+                        current.data.get(CONF_ENABLE_EVENT_LOG, True),
+                    ),
+                ): cv.boolean,
+                vol.Required(
+                    CONF_DYNAMIC_PRIORITY,
+                    default=current.options.get(
+                        CONF_DYNAMIC_PRIORITY,
+                        current.data.get(CONF_DYNAMIC_PRIORITY, True),
+                    ),
+                ): cv.boolean,
+                vol.Optional(
+                    CONF_PRIORITY,
+                    default=current.options.get(
+                        CONF_PRIORITY,
+                        current.data.get(CONF_PRIORITY, DEFAULT_PRIORITY),
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        mode=selector.NumberSelectorMode.BOX,
+                        min=1,
+                        max=MAXIMUM_PRIORITY,
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(step_id="light_options", data_schema=schema)
 
     async def async_step_subscriptions(
         self, user_input: dict[str, Any] | None = None
@@ -562,9 +618,7 @@ class LightOptionsFlowHandler(HassDataOptionsFlow):
     async def async_step_finish_subscriptions(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Finalize adding the notification."""
-        # Add to the entry to sub ensuring defaults are set
-        # self._get_ntfctn_entries().update(SUBSCRIPTION_DEFAULTS | user_input)
+        """Finalize updating subscriptions, preserving all other options."""
         return await self._async_trigger_conf_update(
-            data={CONF_SUBSCRIPTION: user_input}
+            data=self._config_entry.options | {CONF_SUBSCRIPTION: user_input}
         )
