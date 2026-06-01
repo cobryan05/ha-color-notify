@@ -4,6 +4,8 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.color_notify.light import (
+    ATTR_BRIGHTNESS,
+    ATTR_COLOR_MODE,
     ColorInfo,
     LIGHT_OFF_SEQUENCE,
     LIGHT_ON_SEQUENCE,
@@ -209,3 +211,35 @@ class TestTurnOnColorBrightness:
 
         assert len(captured) == 1
         assert captured[0].color.rgb == (127, 0, 0)
+
+
+class TestStateAttributesWhenOff:
+    """state_attributes must explicitly clear color attributes when the light is off.
+
+    HA's entity framework only merges state_attributes when the dict is truthy.
+    An empty dict {} is falsy and is skipped, so the HA state machine retains only
+    capability attributes and the frontend has no brightness key to inspect.
+    Without an explicit brightness=None, the frontend keeps the last displayed
+    brightness value and shows a colored icon + X instead of a grey dimmed icon.
+    """
+
+    def test_state_attributes_includes_brightness_as_none_when_off(self) -> None:
+        """state_attributes must contain brightness=None when the light is off."""
+        entity, _ = make_entity(is_on=False)
+        entity._last_on_rgb = (255, 249, 216)  # simulate a prior on-state
+        attrs = entity.state_attributes
+        assert ATTR_BRIGHTNESS in attrs, (
+            "ATTR_BRIGHTNESS must be present (as None) when off so HA merges it "
+            "and the frontend shows a grey icon instead of a bright colored icon"
+        )
+        assert attrs[ATTR_BRIGHTNESS] is None
+
+    def test_state_attributes_includes_color_mode_as_none_when_off(self) -> None:
+        """state_attributes must contain color_mode=None when the light is off."""
+        entity, _ = make_entity(is_on=False)
+        attrs = entity.state_attributes
+        assert ATTR_COLOR_MODE in attrs, (
+            "ATTR_COLOR_MODE must be present (as None) when off so the frontend "
+            "knows this is a color-capable light in the off state"
+        )
+        assert attrs[ATTR_COLOR_MODE] is None
