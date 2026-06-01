@@ -929,10 +929,17 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             h, s, v = color_RGB_to_hsv(*self._last_on_rgb)
             brightness = (255 / 100) * v  # Re-scale 'v' from 0-100 to 0-255
             data[ATTR_BRIGHTNESS] = brightness
-            data[ATTR_COLOR_TEMP_KELVIN] = color_temperature_to_rgb
             x, y = color_hs_to_xy(h, s)
             data[ATTR_XY_COLOR] = (x, y)
             data[ATTR_COLOR_TEMP_KELVIN] = color_xy_to_temperature(x, y)
+        else:
+            # Explicit None values required: HA skips merging state_attributes
+            # when the dict is falsy, leaving stale on-state values in the HA state.
+            data[ATTR_COLOR_MODE] = None
+            data[ATTR_BRIGHTNESS] = None
+            data[ATTR_RGB_COLOR] = None
+            data[ATTR_XY_COLOR] = None
+            data[ATTR_COLOR_TEMP_KELVIN] = None
         return data
 
     @property
