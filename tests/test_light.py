@@ -1,7 +1,8 @@
 """Tests for color_notify light entity behavior."""
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from conftest import make_config_entry
 
 from custom_components.color_notify.light import (
     ATTR_BRIGHTNESS,
@@ -23,27 +24,7 @@ class FakeState:
 
 
 def make_entity(is_on=False):
-    entry = MagicMock()
-    entry.data = {
-        "type": "light",
-        "name": "Test Light",
-        "entity_id": "light.test",
-        "color_picker": [255, 249, 216],
-        "dynamic_priority": True,
-        "priority": DEFAULT_PRIORITY,
-        "delay": True,
-        "delay_time": {"seconds": 5},
-        "peek_time": {"seconds": 5},
-    }
-    entry.options = {}
-    entry.title = "[Light] Test Light"
-    def _close_coros(*args, **kwargs):
-        for arg in args:
-            if asyncio.iscoroutine(arg):
-                arg.close()
-
-    entry.async_create_background_task = MagicMock(side_effect=_close_coros)
-    entry.async_on_unload = MagicMock()
+    entry = make_config_entry()
 
     entity = NotificationLightEntity(
         unique_id="test_id",

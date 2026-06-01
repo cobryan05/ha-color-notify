@@ -2,6 +2,8 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
+from conftest import make_config_entry
+
 from custom_components.color_notify.sensor import ColorNotifyLogEntity
 from custom_components.color_notify.light import (
     ColorInfo,
@@ -20,35 +22,15 @@ from homeassistant.const import STATE_OFF, STATE_ON
 # ---------------------------------------------------------------------------
 
 
-def _make_config_entry(title="[Light] Test Light"):
-    entry = MagicMock()
-    entry.entry_id = "test_entry_id"
-    entry.title = title
-    entry.data = {
-        "type": "light",
-        "entity_id": "light.test",
-        "color_picker": [255, 249, 216],
-        "dynamic_priority": True,
-        "priority": DEFAULT_PRIORITY,
-        "delay": True,
-        "delay_time": {"seconds": 5},
-        "peek_time": {"seconds": 5},
-    }
-    entry.options = {}
-    entry.async_create_background_task = MagicMock()
-    entry.async_on_unload = MagicMock()
-    return entry
-
-
 def _make_log_entity(title="[Light] Test Light"):
-    entry = _make_config_entry(title)
+    entry = make_config_entry(title)
     entity = ColorNotifyLogEntity(light_unique_id="test_id", config_entry=entry)
     return entity
 
 
 def _make_light_entity(log_entity=None, is_on=False):
     """Return (entity, entry) with an optional ColorNotifyLogEntity wired in."""
-    entry = _make_config_entry()
+    entry = make_config_entry()
     entity = NotificationLightEntity(
         unique_id="test_id",
         wrapped_entity_id="light.test",

@@ -108,3 +108,39 @@ ha_core.callback = lambda f: f
 ha_core.Event = MagicMock()
 ha_core.EventStateChangedData = MagicMock()
 ha_core.HomeAssistant = MagicMock()
+
+# ---------------------------------------------------------------------------
+# Shared test helpers
+# ---------------------------------------------------------------------------
+
+# Safe to import here: const.py has no homeassistant dependencies.
+from custom_components.color_notify.const import DEFAULT_PRIORITY  # noqa: E402
+
+
+def make_config_entry(title: str = "[Light] Test Light") -> MagicMock:
+    """Return a standard MagicMock config entry for unit testing."""
+    entry = MagicMock()
+    entry.entry_id = "test_entry_id"
+    entry.title = title
+    entry.data = {
+        "type": "light",
+        "entity_id": "light.test",
+        "color_picker": [255, 249, 216],
+        "dynamic_priority": True,
+        "priority": DEFAULT_PRIORITY,
+        "delay": True,
+        "delay_time": {"seconds": 5},
+        "peek_time": {"seconds": 5},
+    }
+    entry.options = {}
+    entry.async_on_unload = MagicMock()
+
+    def _create_background_task(hass, coro, name="", **kwargs):
+        coro.close()
+        task = MagicMock()
+        task.cancel = MagicMock()
+        task.done = MagicMock(return_value=True)
+        return task
+
+    entry.async_create_background_task = MagicMock(side_effect=_create_background_task)
+    return entry
