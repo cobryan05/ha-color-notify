@@ -752,6 +752,8 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         # read it directly rather than doing a second hass.states.get lookup.
         friendly = event.data["new_state"].attributes.get("friendly_name") or notify_id
         if is_on:
+            if notify_id in self._active_sequences and event.data.get("old_state") is None:
+                return
             sequence = self._create_sequence_from_attr(
                 event.data["new_state"].attributes, notify_id
             )
