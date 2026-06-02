@@ -1,9 +1,12 @@
 """Tests for color_notify light entity behavior."""
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from conftest import make_config_entry
+
 from custom_components.color_notify.light import (
+    ATTR_BRIGHTNESS,
+    ATTR_COLOR_MODE,
     ColorInfo,
     LIGHT_OFF_SEQUENCE,
     LIGHT_ON_SEQUENCE,
@@ -15,37 +18,19 @@ from custom_components.color_notify.const import DEFAULT_PRIORITY
 
 
 class FakeState:
-    def __init__(self, state: str):
+    def __init__(self, state: str, attributes: dict | None = None):
         self.state = state
+        self.attributes = attributes or {}
 
 
 def make_entity(is_on=False):
-    entry = MagicMock()
-    entry.data = {
-        "type": "light",
-        "name": "Test Light",
-        "entity_id": "light.test",
-        "color_picker": [255, 249, 216],
-        "dynamic_priority": True,
-        "priority": DEFAULT_PRIORITY,
-        "delay": True,
-        "delay_time": {"seconds": 5},
-        "peek_time": {"seconds": 5},
-    }
-    entry.options = {}
-    entry.title = "[Light] Test Light"
-    def _close_coros(*args, **kwargs):
-        for arg in args:
-            if asyncio.iscoroutine(arg):
-                arg.close()
-
-    entry.async_create_background_task = MagicMock(side_effect=_close_coros)
-    entry.async_on_unload = MagicMock()
+    entry = make_config_entry()
 
     entity = NotificationLightEntity(
         unique_id="test_id",
         wrapped_entity_id="light.test",
         config_entry=entry,
+        log_entity=None,
     )
     entity.hass = MagicMock()
 
@@ -70,11 +55,12 @@ class TestWorkerSpawnOrder:
             call_order.append("get_last_state")
             return FakeState("on")
 
-        def tracked_create_background_task(*args, **kwargs):
+        def tracked_create_background_task(hass, coro, name, **kwargs):
             call_order.append("create_background_task")
-            for arg in args:
-                if asyncio.iscoroutine(arg):
-                    arg.close()
+            coro.close()
+            task = MagicMock()
+            task.cancel = MagicMock()
+            return task
 
         entity.async_get_last_state = tracked_get_last_state
         entry.async_create_background_task = tracked_create_background_task
@@ -85,14 +71,26 @@ class TestWorkerSpawnOrder:
             "get_last_state"
         )
 
+        await entity.async_will_remove_from_hass()
+
     async def test_worker_spawns_without_restored_state(self):
         """Background task is created even when there's no restored state."""
         entity, entry = make_entity()
         entity.async_get_last_state = AsyncMock(return_value=None)
 
+        def create_task_mock(hass, coro, name, **kwargs):
+            coro.close()
+            task = MagicMock()
+            task.cancel = MagicMock()
+            return task
+
+        entry.async_create_background_task = MagicMock(side_effect=create_task_mock)
+
         await entity.async_added_to_hass()
 
         entry.async_create_background_task.assert_called_once()
+
+        await entity.async_will_remove_from_hass()
 
 
 class TestAsyncToggleDynamicPriority:
@@ -161,7 +159,7 @@ class TestTurnOnColorBrightness:
         entity, _entry = self._make_entity()
         captured: list[_NotificationSequence] = []
 
-        async def capture_add(notify_id: str, sequence: _NotificationSequence) -> None:
+        async def capture_add(notify_id: str, sequence: _NotificationSequence, log_trigger: str | None = None) -> None:
             captured.append(sequence)
 
         entity._add_sequence = capture_add
@@ -181,7 +179,7 @@ class TestTurnOnColorBrightness:
         entity._last_on_rgb = (255, 0, 0)
         captured: list[_NotificationSequence] = []
 
-        async def capture_add(notify_id: str, sequence: _NotificationSequence) -> None:
+        async def capture_add(notify_id: str, sequence: _NotificationSequence, log_trigger: str | None = None) -> None:
             captured.append(sequence)
 
         entity._add_sequence = capture_add
@@ -194,3 +192,35 @@ class TestTurnOnColorBrightness:
 
         assert len(captured) == 1
         assert captured[0].color.rgb == (127, 0, 0)
+
+
+class TestStateAttributesWhenOff:
+    """state_attributes must explicitly clear color attributes when the light is off.
+
+    HA's entity framework only merges state_attributes when the dict is truthy.
+    An empty dict {} is falsy and is skipped, so the HA state machine retains only
+    capability attributes and the frontend has no brightness key to inspect.
+    Without an explicit brightness=None, the frontend keeps the last displayed
+    brightness value and shows a colored icon + X instead of a grey dimmed icon.
+    """
+
+    def test_state_attributes_includes_brightness_as_none_when_off(self) -> None:
+        """state_attributes must contain brightness=None when the light is off."""
+        entity, _ = make_entity(is_on=False)
+        entity._last_on_rgb = (255, 249, 216)  # simulate a prior on-state
+        attrs = entity.state_attributes
+        assert ATTR_BRIGHTNESS in attrs, (
+            "ATTR_BRIGHTNESS must be present (as None) when off so HA merges it "
+            "and the frontend shows a grey icon instead of a bright colored icon"
+        )
+        assert attrs[ATTR_BRIGHTNESS] is None
+
+    def test_state_attributes_includes_color_mode_as_none_when_off(self) -> None:
+        """state_attributes must contain color_mode=None when the light is off."""
+        entity, _ = make_entity(is_on=False)
+        attrs = entity.state_attributes
+        assert ATTR_COLOR_MODE in attrs, (
+            "ATTR_COLOR_MODE must be present (as None) when off so the frontend "
+            "knows this is a color-capable light in the off state"
+        )
+        assert attrs[ATTR_COLOR_MODE] is None

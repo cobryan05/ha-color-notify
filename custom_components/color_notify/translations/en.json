@@ -1,4 +1,11 @@
 {
+  "entity": {
+    "sensor": {
+      "event_log": {
+        "name": "Event log"
+      }
+    }
+  },
   "config": {
     "step": {
       "user": {
@@ -30,7 +37,8 @@
           "dynamic_priority": "Dynamic 'On' Priority (inherit active light priority + 0.5 when switched on)",
           "peek_time": "Duration to temporarily display lower-priority notifications",
           "delay": "Auto-cycle between same priority notifications",
-          "delay_time": "Auto-cycle delay"
+          "delay_time": "Auto-cycle delay",
+          "enable_event_log": "Enable event logging entity"
         }
       },
       "reconfigure_light": {
@@ -43,7 +51,8 @@
           "dynamic_priority": "Dynamic 'On' Priority (inherit active light priority + 0.5 when switched on)",
           "peek_time": "Duration to temporarily display lower-priority notifications",
           "delay": "Auto-cycle between same priority notifications",
-          "delay_time": "Auto-cycle delay"
+          "delay_time": "Auto-cycle delay",
+          "enable_event_log": "Enable event logging entity"
         }
       }
     }
@@ -103,11 +112,18 @@
         }
       },
       "light_init": {
-        "description": "Configure Light",
+        "description": "Configure light",
         "menu_options": {
-          "light_options": "Change Light Settings",
-          "subscriptions": "Modify light subscriptions",
-          "unique_id": ""
+          "light_options": "Change light settings",
+          "subscriptions": "Modify subscriptions"
+        }
+      },
+      "light_options": {
+        "description": "Change light settings",
+        "data": {
+          "enable_event_log": "Enable event logging entity",
+          "dynamic_priority": "Dynamic 'On' priority (inherit active light priority + 0.5 when switched on)",
+          "priority": "Minimum 'On' priority"
         }
       },
       "subscriptions": {
@@ -125,6 +141,7 @@
           "color_picker": "Default 'On' color of light",
           "priority": "Minimum 'On' priority.",
           "dynamic_priority": "Dynamic 'On' Priority (inherit active light priority + 0.5 when switched on)",
+          "enable_event_log": "Enable event logging entity",
           "peek_time": "Duration to temporarily display lower-priority notifications",
           "delay": "Auto-cycle between same priority notifications",
           "delay_time": "Auto-cycle delay"

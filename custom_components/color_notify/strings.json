@@ -1,4 +1,11 @@
 {
+  "entity": {
+    "sensor": {
+      "event_log": {
+        "name": "Event log"
+      }
+    }
+  },
   "config": {
     "step": {
       "user": {
@@ -17,11 +24,31 @@
         "data": {
           "name": "Collection name"
         }
+      },
+      "new_light": {
+        "data": {
+          "enable_event_log": "Enable event log"
+        }
       }
     }
   },
   "options": {
     "step": {
+      "light_init": {
+        "description": "Configure light",
+        "menu_options": {
+          "light_options": "Change light settings",
+          "subscriptions": "Modify subscriptions"
+        }
+      },
+      "light_options": {
+        "description": "Change light settings",
+        "data": {
+          "enable_event_log": "Enable event log",
+          "dynamic_priority": "Dynamic 'On' priority",
+          "priority": "Minimum 'On' priority"
+        }
+      },
       "pool_init": {
         "description": "Configure Pool Items",
         "menu_options": {
