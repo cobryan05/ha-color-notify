@@ -7,5 +7,5 @@
   "integration_type": "hub",
   "iot_class": "calculated",
   "issue_tracker": "https://github.com/cobryan05/ha-color-notify/issues",
-  "version": "0.2.3"
+  "version": "0.2.4"
 }
