@@ -85,13 +85,9 @@ Notifications are organized into pools and customized with priorities, lifetimes
 
 ---
 
-## Roadmap / TODO
+## Fuel the Development
 
-* [ ] Separate RGB and brightness controls specifically for animation profiles.
-* [ ] Introduce native Home Assistant service calls for fine-grained management (e.g., clearing notifications, manual cycle forcing).
-* [ ] Implement transition fade controls.
-* [ ] Support non-RGB lighting configurations (HSV, Color Temperature).
+This project is open-source and free to use. If it saves you time or automates your home a little better, [GitHub Sponsorships](https://github.com/sponsors/cobryan05) (both one-time tips and recurring) are always appreciated but never required.
 
----
-
-Enjoy utilizing **Color Notify** to bring intuitive, high-visibility visual feedback to your smart home environment!
+### Feedback & Ideas
+I’d love to hear how you're using this integration! Whether you have a feature idea, ran into a bug, or just want to share your automation setup, feel free to open an [Issue](https://github.com/cobryan05/ha-color-notify/issues) or join the [Discussions](https://github.com/cobryan05/ha-color-notify/discussions). Hearing how it works in the wild keeps the project moving forward.
