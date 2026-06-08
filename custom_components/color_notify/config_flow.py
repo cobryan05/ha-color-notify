@@ -791,7 +791,6 @@ class LightOptionsFlowHandler(HassDataOptionsFlow):
             return await self._async_trigger_conf_update(
                 data=self._config_entry.options
                 | {
-                    CONF_ENABLE_EVENT_LOG: user_input[CONF_ENABLE_EVENT_LOG],
                     CONF_DYNAMIC_PRIORITY: user_input[CONF_DYNAMIC_PRIORITY],
                     CONF_PRIORITY: user_input[CONF_PRIORITY],
                 }
@@ -800,13 +799,6 @@ class LightOptionsFlowHandler(HassDataOptionsFlow):
         current = self._config_entry
         schema = vol.Schema(
             {
-                vol.Required(
-                    CONF_ENABLE_EVENT_LOG,
-                    default=current.options.get(
-                        CONF_ENABLE_EVENT_LOG,
-                        current.data.get(CONF_ENABLE_EVENT_LOG, True),
-                    ),
-                ): cv.boolean,
                 vol.Required(
                     CONF_DYNAMIC_PRIORITY,
                     default=current.options.get(

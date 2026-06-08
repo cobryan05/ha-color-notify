@@ -1,0 +1,47 @@
+preview_sequence:
+  name: Preview Sequence
+  description: Previews a notification sequence on target entities. All fields are optional.
+  target:
+    entity:
+  fields:
+    notify_pattern:
+      name: Notify Pattern
+      description: A list of strings representing the notification pattern sequence.
+      selector:
+        object:
+    rgb_selector:
+      name: RGB Selector
+      description: A list containing RGB values or light selections.
+      selector:
+        object:
+    priority:
+      name: Priority
+      description: The priority level for this preview.
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 255
+          mode: box
+    peek_enabled:
+      name: Peek Enabled
+      description: Determine if peeking into the current state is allowed.
+      default: true
+      selector:
+        boolean:
+    expire_enabled:
+      name: Expire Enabled
+      description: Determine if the sequence preview should automatically expire.
+      default: false
+      selector:
+        boolean:
+    delay_time:
+      name: Delay Time
+      description: Target time delay parameters. Passed as a dictionary.
+      selector:
+        object:
+stop_preview:
+  name: Stop Preview
+  description: Stops any currently running preview sequence on target entities.
+  target:
+    entity:

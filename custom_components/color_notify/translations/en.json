@@ -165,14 +165,6 @@
           "subscriptions": "Modify subscriptions"
         }
       },
-      "light_options": {
-        "description": "Change light settings",
-        "data": {
-          "enable_event_log": "Enable event logging entity",
-          "dynamic_priority": "Dynamic 'On' priority (inherit active light priority + 0.5 when switched on)",
-          "priority": "Minimum 'On' priority"
-        }
-      },
       "subscriptions": {
         "description": "Subscribe to entire pools and/or individual notifications\nUse 'Reconfigure' to update other bulb settings.",
         "data": {
