@@ -32,7 +32,42 @@
       }
     }
   },
+  "services": {
+    "stop_preview": {
+      "name": "Stop preview",
+      "description": "Stop any running preview sequence on a ColorNotify light wrapper."
+    },
+    "preview_sequence": {
+      "name": "Preview sequence",
+      "description": "Play a temporary notification sequence on a ColorNotify light wrapper to preview what it will look like.",
+      "fields": {
+        "pattern": {
+          "name": "Pattern",
+          "description": "List of pattern entries (JSON color objects, '[', or '],N')."
+        },
+        "color_picker": {
+          "name": "Color",
+          "description": "Solid RGB color used when no pattern is provided."
+        },
+        "priority": {
+          "name": "Priority",
+          "description": "Priority of the preview notification."
+        },
+        "peek_enabled": {
+          "name": "Peek enabled",
+          "description": "Temporarily boost priority on activation."
+        },
+        "preview_duration": {
+          "name": "Preview duration",
+          "description": "Seconds before the preview automatically clears."
+        }
+      }
+    }
+  },
   "options": {
+    "error": {
+      "select_test_light": "Select a light to preview the sequence on"
+    },
     "step": {
       "light_init": {
         "description": "Configure light",
@@ -59,13 +94,19 @@
         }
       },
       "add_notification": {
-        "description": "Set up the new notification below.\nColor Picker can set a solid color or look up #RRGGBB values for pattern use.\nCreate a pattern by using the +Add button (see sample flow)\nAuto-Clear with a 0s timeout clears immediately after pattern finishes.\nLarger numbers are higher priority.",
+        "description": "Set up the new notification below.\nAuto-Clear with a 0s timeout clears immediately after the pattern finishes.\nLarger numbers are higher priority.",
         "data": {
           "name": "Name for notification",
           "expire_enabled": "Automatically clear after timeout?",
           "delay_time": "Auto-clear timeout",
           "pattern": "'#0000FF', '#FF0000,10', '[' or '], loopcnt'",
-          "color_picker": "Select a color, or '+Add' pattern"
+          "color_picker": "Solid color",
+          "test_action": "Submit action",
+          "test_light": "Preview light"
+        },
+        "data_description": {
+          "pattern": "Each '+' entry is a color step. Use '[' to open a loop and '], N' to close it (N = 0 for infinite). Leave empty to show a solid color instead.",
+          "color_picker": "If no pattern steps are defined above, this color is the notification's display color. To add this color as a step in the sequence, choose 'Append selected color to pattern' below."
         }
       },
       "modify_notification_select": {
@@ -75,7 +116,16 @@
         }
       },
       "modify_notification": {
-        "description": "Set up the notification below.\nColor Picker can set a solid color or look up #RRGGBB values for pattern use.\nCreate a pattern by using the +Add button.\nAuto-Clear with a 0s timeout clears immediately after pattern finishes.\nLarger numbers are higher priority."
+        "description": "Set up the notification below.\nAuto-Clear with a 0s timeout clears immediately after the pattern finishes.\nLarger numbers are higher priority.",
+        "data": {
+          "color_picker": "Solid color",
+          "test_action": "Submit action",
+          "test_light": "Preview light"
+        },
+        "data_description": {
+          "pattern": "Each '+' entry is a color step. Use '[' to open a loop and '], N' to close it (N = 0 for infinite). Leave empty to show a solid color instead.",
+          "color_picker": "If no pattern steps are defined above, this color is the notification's display color. To add this color as a step in the sequence, choose 'Append selected color to pattern' below."
+        }
       },
       "delete_notification": {
         "description": "Delete existing notifications.",

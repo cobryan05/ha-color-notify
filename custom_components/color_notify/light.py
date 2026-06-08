@@ -10,6 +10,8 @@ from functools import cached_property
 import logging
 from typing import Any
 
+import voluptuous as vol
+
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_MODE,
@@ -34,7 +36,8 @@ from homeassistant.const import (
     Platform,
 )
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
-from homeassistant.helpers import entity_registry as er
+import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers import entity_platform, entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -59,6 +62,9 @@ from .const import (
     CONF_PEEK_ENABLED,
     CONF_PEEK_TIME,
     CONF_PRIORITY,
+    MAX_PREVIEW_DURATION_SEC,
+    PREVIEW_NOTIFY_ID,
+    SERVICE_STOP_PREVIEW,
     CONF_RGB_SELECTOR,
     CONF_SUBSCRIPTION,
     DEFAULT_PRIORITY,
@@ -66,6 +72,7 @@ from .const import (
     INIT_STATE_UPDATE_DELAY_SEC,
     MAXIMUM_PRIORITY,
     OFF_RGB,
+    SERVICE_PREVIEW_SEQUENCE,
     TYPE_POOL,
     WARM_WHITE_RGB,
 )
@@ -74,6 +81,19 @@ from .utils.hass_data import HassData
 from .utils.light_sequence import ColorInfo, LightSequence
 
 _LOGGER = logging.getLogger(__name__)
+
+# Schema for the preview_sequence entity service.  All fields are optional so
+# callers can pass only what they have (e.g. just a pattern, or just a color).
+SERVICE_PREVIEW_SEQUENCE_SCHEMA: dict = {
+    vol.Optional(CONF_NOTIFY_PATTERN): vol.Any(None, [str]),
+    vol.Optional(CONF_RGB_SELECTOR): list,
+    vol.Optional(CONF_PRIORITY, default=DEFAULT_PRIORITY): vol.All(
+        vol.Coerce(int), vol.Range(min=1, max=MAXIMUM_PRIORITY)
+    ),
+    vol.Optional(CONF_PEEK_ENABLED, default=True): cv.boolean,
+    vol.Optional(CONF_EXPIRE_ENABLED, default=False): cv.boolean,
+    vol.Optional(CONF_DELAY_TIME): dict,
+}
 
 
 async def async_setup_entry(
@@ -99,6 +119,19 @@ async def async_setup_entry(
     new_entity = NotificationLightEntity(unique_id, wrapped_entity_id, config_entry, log_entity)
     runtime_data[CONF_ENTITIES] = new_entity
     async_add_entities([new_entity])
+
+    # Register entity services once per domain (idempotent).
+    current_platform = entity_platform.async_get_current_platform()
+    current_platform.async_register_entity_service(
+        SERVICE_PREVIEW_SEQUENCE,
+        SERVICE_PREVIEW_SEQUENCE_SCHEMA,
+        "async_preview_sequence",
+    )
+    current_platform.async_register_entity_service(
+        SERVICE_STOP_PREVIEW,
+        {},
+        "async_stop_preview",
+    )
 
 
 @dataclass
@@ -262,6 +295,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
 
         self._task_queue: asyncio.Queue[_QueueEntry] = asyncio.Queue()
         self._task: asyncio.Task | None = None
+        self._preview_cancel: Callable | None = None
 
         self._light_on_priority: int = config_entry.options.get(
             CONF_PRIORITY, DEFAULT_PRIORITY
@@ -913,6 +947,39 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             await self.async_turn_on(**kwargs)
         else:
             await self.async_turn_off(**kwargs)
+
+    async def async_preview_sequence(self, **kwargs: Any) -> None:
+        """Play a preview notification sequence on this light.
+
+        Replaces any currently running preview. Auto-expires after
+        MAX_PREVIEW_DURATION_SEC as a safety cap (browser crash, abandoned
+        config flow, etc.). Call async_stop_preview to clear it sooner.
+        """
+        # Cancel any existing safety-cap timer before replacing the preview.
+        if self._preview_cancel is not None:
+            self._preview_cancel()
+            self._preview_cancel = None
+
+        await self._remove_sequence(PREVIEW_NOTIFY_ID)
+        attrs = {**kwargs, CONF_EXPIRE_ENABLED: False}
+        attrs.pop(CONF_DELAY_TIME, None)
+        sequence = self._create_sequence_from_attr(attrs, PREVIEW_NOTIFY_ID)
+        await self._add_sequence(PREVIEW_NOTIFY_ID, sequence)
+
+        async def _expire_preview(_: Any) -> None:
+            self._preview_cancel = None
+            await self._remove_sequence(PREVIEW_NOTIFY_ID)
+
+        self._preview_cancel = async_call_later(
+            self.hass, MAX_PREVIEW_DURATION_SEC, _expire_preview
+        )
+
+    async def async_stop_preview(self, **kwargs: Any) -> None:
+        """Stop any running preview on this light."""
+        if self._preview_cancel is not None:
+            self._preview_cancel()
+            self._preview_cancel = None
+        await self._remove_sequence(PREVIEW_NOTIFY_ID)
 
     @property
     def capability_attributes(self) -> dict[str, Any] | None:

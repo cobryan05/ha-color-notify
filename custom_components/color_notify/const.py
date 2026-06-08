@@ -27,6 +27,14 @@ CONF_LOADED_PLATFORMS: Final = "loaded_platforms"
 
 ACTION_CYCLE_SAME: Final = "cycle_same"
 
+CONF_TEST_LIGHT: Final = "test_light"
+CONF_TEST_ACTION: Final = "test_action"
+SERVICE_PREVIEW_SEQUENCE: Final = "preview_sequence"
+SERVICE_STOP_PREVIEW: Final = "stop_preview"
+PREVIEW_NOTIFY_ID: Final = "__preview__"
+MAX_PREVIEW_DURATION_SEC: Final = 300  # 5-minute safety cap
+DEFAULT_COLOR_STEP_DELAY_SEC: Final = 1.0  # default delay injected by "Append color" action
+
 OFF_RGB: Final = (0, 0, 0)
 WARM_WHITE_RGB: Final = (255, 249, 216)
 

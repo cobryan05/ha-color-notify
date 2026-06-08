@@ -68,12 +68,20 @@ class HassData:
     @callback
     @staticmethod
     def get_domain_light_entity_ids(hass: HomeAssistant) -> list[str]:
-        """Return a list of all wrapper light entity_ids."""
+        """Return a list of all wrapper light entity_ids.
+
+        Only includes the light-domain entity for each Light config entry;
+        companion sensor (event-log) entities are excluded.
+        """
         entity_registry: er.EntityRegistry = er.async_get(hass)
         ret: list[str] = []
         for uid in HassData.get_domain_lights(hass).keys():
             entities = er.async_entries_for_config_entry(entity_registry, uid)
-            ret.extend([entity.entity_id for entity in entities])
+            ret.extend(
+                entity.entity_id
+                for entity in entities
+                if entity.domain == "light"
+            )
         return ret
 
     @callback

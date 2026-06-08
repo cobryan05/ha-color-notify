@@ -57,7 +57,42 @@
       }
     }
   },
+  "services": {
+    "stop_preview": {
+      "name": "Stop preview",
+      "description": "Stop any running preview sequence on a ColorNotify light wrapper."
+    },
+    "preview_sequence": {
+      "name": "Preview sequence",
+      "description": "Play a temporary notification sequence on a ColorNotify light wrapper to preview what it will look like.",
+      "fields": {
+        "pattern": {
+          "name": "Pattern",
+          "description": "List of pattern entries (JSON color objects, '[', or '],N')."
+        },
+        "color_picker": {
+          "name": "Color",
+          "description": "Solid RGB color used when no pattern is provided."
+        },
+        "priority": {
+          "name": "Priority",
+          "description": "Priority of the preview notification."
+        },
+        "peek_enabled": {
+          "name": "Peek enabled",
+          "description": "Temporarily boost priority on activation."
+        },
+        "preview_duration": {
+          "name": "Preview duration",
+          "description": "Seconds before the preview automatically clears."
+        }
+      }
+    }
+  },
   "options": {
+    "error": {
+      "select_test_light": "Select a light to preview the sequence on"
+    },
     "step": {
       "pool_init": {
         "description": "Configure Pool Items",
@@ -70,15 +105,21 @@
         }
       },
       "add_notification": {
-        "description": "Set up the notification below.\n&bull;Color Picker can set a solid color or look up RGB values for pattern use.\n&bull;Create a pattern by using the +Add button.\n&bull;Auto-Clear with a 0s timeout clears immediately after pattern finishes.\n&bull;Any other timeout is measured from notification start.\n&bull;Larger numbers are higher priority.",
+        "description": "Set up the notification below.\n&bull;Auto-Clear with a 0s timeout clears immediately after the pattern finishes.\n&bull;Any other timeout is measured from notification start.\n&bull;Larger numbers are higher priority.",
         "data": {
           "name": "Name for notification",
           "expire_enabled": "Automatically clear after timeout?",
           "delay_time": "Auto-clear timeout",
           "pattern": "eg, '[' or '], loopcnt' or '{{\"rgb\": [255,0,0], \"delay\": 1.5}}'",
-          "color_picker": "Select a solid color, or use '+Add' to create a pattern",
+          "color_picker": "Solid color",
           "peek_enabled": "Temporarily show on activation, regardless of priority.",
-          "unique_id": ""
+          "unique_id": "",
+          "test_action": "Submit action",
+          "test_light": "Preview light"
+        },
+        "data_description": {
+          "pattern": "Each '+' entry is a color step. Use '[' to open a loop and '], N' to close it (N = 0 for infinite). Leave empty to show a solid color instead.",
+          "color_picker": "If no pattern steps are defined above, this color is the notification's display color. To add this color as a step in the sequence, choose 'Append selected color to pattern' below."
         }
       },
       "add_notification_copy": {
@@ -94,15 +135,21 @@
         }
       },
       "modify_notification": {
-        "description": "Set up the notification below.\n&bull;Color Picker can set a solid color or look up RGB values for pattern use.\n&bull;Create a pattern by using the +Add button.\n&bull;Auto-Clear with a 0s timeout clears immediately after pattern finishes.\n&bull;Any other timeout is measured from notification start.\n&bull;Larger numbers are higher priority.",
+        "description": "Set up the notification below.\n&bull;Auto-Clear with a 0s timeout clears immediately after the pattern finishes.\n&bull;Any other timeout is measured from notification start.\n&bull;Larger numbers are higher priority.",
         "data": {
           "name": "Name for notification",
           "expire_enabled": "Automatically clear after timeout?",
           "delay_time": "Auto-clear timeout",
           "pattern": "eg, '[' or '], loopcnt' or '{{\"rgb\": [255,0,0], \"delay\": 1.5}}'",
-          "color_picker": "Select a solid color, or use '+Add' to create a pattern",
+          "color_picker": "Solid color",
           "peek_enabled": "Temporarily show on activation, regardless of priority.",
-          "unique_id": ""
+          "unique_id": "",
+          "test_action": "Submit action",
+          "test_light": "Preview light"
+        },
+        "data_description": {
+          "pattern": "Each '+' entry is a color step. Use '[' to open a loop and '], N' to close it (N = 0 for infinite). Leave empty to show a solid color instead.",
+          "color_picker": "If no pattern steps are defined above, this color is the notification's display color. To add this color as a step in the sequence, choose 'Append selected color to pattern' below."
         }
       },
       "delete_notification": {
