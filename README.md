@@ -72,7 +72,8 @@ Notifications are organized into pools and customized with priorities, lifetimes
 * **Pattern:** Build complex animations using a sequence of JSON steps containing colors and delays:
   * **Loops:** Use `[` to open a loop and `], loopcnt` to close and define its repetitions (e.g., `], 5` runs that segment five times).
   * **Steps:** Format individual color blocks with RGB values and duration in seconds (e.g., `{"rgb": [255,0,0], "delay": 0.5}` flashes red for half a second).
-
+* **Preview Options:** Immediately test your changes straight from the config flow
+  * Preview your notification immediately on any registered light
 ---
 
 ## Usage
@@ -84,6 +85,12 @@ Notifications are organized into pools and customized with priorities, lifetimes
 [![Light Subscription Example](https://raw.githubusercontent.com/cobryan05/ha-color-notify/refs/heads/main/images/subscriptions.png?raw=true)](https://raw.githubusercontent.com/cobryan05/ha-color-notify/refs/heads/main/images/subscriptions.png?raw=true)
 
 ---
+
+## Logging
+
+Each wrapper light can optionally maintain a history of active and historical notifications, making it easy to track which alerts are triggering and when.
+
+[![Notification Log Example](https://raw.githubusercontent.com/cobryan05/ha-color-notify/refs/heads/main/images/light_log.png?raw=true)](https://raw.githubusercontent.com/cobryan05/ha-color-notify/refs/heads/main/images/light_log.png?raw=true)
 
 ## Fuel the Development
 

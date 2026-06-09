@@ -1,6 +1,7 @@
 """Light platform for ColorNotify integration."""
 
 import asyncio
+import contextlib
 import time
 from collections.abc import Callable, Coroutine
 from copy import copy
@@ -9,6 +10,8 @@ from datetime import timedelta
 from functools import cached_property
 import logging
 from typing import Any
+
+import voluptuous as vol
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
@@ -34,7 +37,8 @@ from homeassistant.const import (
     Platform,
 )
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
-from homeassistant.helpers import entity_registry as er
+import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers import entity_platform, entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -59,6 +63,10 @@ from .const import (
     CONF_PEEK_ENABLED,
     CONF_PEEK_TIME,
     CONF_PRIORITY,
+    CONF_WARMUP_TIME,
+    MAX_PREVIEW_DURATION_SEC,
+    PREVIEW_NOTIFY_ID,
+    SERVICE_STOP_PREVIEW,
     CONF_RGB_SELECTOR,
     CONF_SUBSCRIPTION,
     DEFAULT_PRIORITY,
@@ -66,6 +74,7 @@ from .const import (
     INIT_STATE_UPDATE_DELAY_SEC,
     MAXIMUM_PRIORITY,
     OFF_RGB,
+    SERVICE_PREVIEW_SEQUENCE,
     TYPE_POOL,
     WARM_WHITE_RGB,
 )
@@ -74,6 +83,19 @@ from .utils.hass_data import HassData
 from .utils.light_sequence import ColorInfo, LightSequence
 
 _LOGGER = logging.getLogger(__name__)
+
+# Schema for the preview_sequence entity service.  All fields are optional so
+# callers can pass only what they have (e.g. just a pattern, or just a color).
+SERVICE_PREVIEW_SEQUENCE_SCHEMA: dict = {
+    vol.Optional(CONF_NOTIFY_PATTERN): vol.Any(None, [str]),
+    vol.Optional(CONF_RGB_SELECTOR): list,
+    vol.Optional(CONF_PRIORITY, default=DEFAULT_PRIORITY): vol.All(
+        vol.Coerce(int), vol.Range(min=1, max=MAXIMUM_PRIORITY)
+    ),
+    vol.Optional(CONF_PEEK_ENABLED, default=True): cv.boolean,
+    vol.Optional(CONF_EXPIRE_ENABLED, default=False): cv.boolean,
+    vol.Optional(CONF_DELAY_TIME): dict,
+}
 
 
 async def async_setup_entry(
@@ -100,6 +122,19 @@ async def async_setup_entry(
     runtime_data[CONF_ENTITIES] = new_entity
     async_add_entities([new_entity])
 
+    # Register entity services once per domain (idempotent).
+    current_platform = entity_platform.async_get_current_platform()
+    current_platform.async_register_entity_service(
+        SERVICE_PREVIEW_SEQUENCE,
+        SERVICE_PREVIEW_SEQUENCE_SCHEMA,
+        "async_preview_sequence",
+    )
+    current_platform.async_register_entity_service(
+        SERVICE_STOP_PREVIEW,
+        {},
+        "async_stop_preview",
+    )
+
 
 @dataclass
 class _NotificationSequence:
@@ -125,6 +160,7 @@ class _NotificationSequence:
         self._peek_enabled: bool = peek_enabled
         self._step_finished: asyncio.Event = asyncio.Event()
         self._step_finished.set()
+        self._initial_hold_sec: float = 0.0
         self.reset()  # Set initial color from pattern
 
     def __repr__(self) -> str:
@@ -154,6 +190,10 @@ class _NotificationSequence:
             else ColorInfo(OFF_RGB, 0)
         )
 
+    def set_initial_hold(self, seconds: float) -> None:
+        """Set extra hold time for the first color step (e.g. bulb warm-up)."""
+        self._initial_hold_sec = seconds
+
     async def _worker_func(self, stop_event: asyncio.Event):
         """Coroutine to run the animation until finished or interrupted."""
         # TODO: Is this extra task needed around sequence?
@@ -161,17 +201,24 @@ class _NotificationSequence:
 
         # Read in the pattern and init
         self.reset()
+        hold_delay = self._initial_hold_sec
         try:
             while not done and not stop_event.is_set():
                 self._step_finished.clear()
                 done = await self._sequence.runNextStep()
-                self._step_finished.set()
                 if not stop_event.is_set():  # Don't update if we were interrupted
                     self._color = self._sequence.color
+                if hold_delay > 0 and not stop_event.is_set():
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(stop_event.wait(), timeout=hold_delay)
+                    hold_delay = 0
+                self._step_finished.set()
         except Exception as e:
             _LOGGER.exception("Failed running NotificationAnimation")
-        # Autoclear after animation if delay is 0
-        if self._clear_delay == 0:
+        # Autoclear after animation if delay is 0, but only when the animation
+        # ran to completion — not when it was stopped externally (e.g. by a
+        # higher-priority notification taking over).
+        if self._clear_delay == 0 and done:
             await self._hass.services.async_call(
                 Platform.SWITCH,
                 SERVICE_TURN_OFF,
@@ -262,6 +309,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
 
         self._task_queue: asyncio.Queue[_QueueEntry] = asyncio.Queue()
         self._task: asyncio.Task | None = None
+        self._preview_cancel: Callable | None = None
 
         self._light_on_priority: int = config_entry.options.get(
             CONF_PRIORITY, DEFAULT_PRIORITY
@@ -428,12 +476,17 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             # Log the notification event with the current display state.
             self._log_display_state(top_sequences, log_trigger)
 
+            wrapped_state = self.hass.states.get(self._wrapped_entity_id)
+            bulb_is_off = wrapped_state is None or wrapped_state.state != STATE_ON
+            warmup_ms: int = self._config_entry.data.get(CONF_WARMUP_TIME, 0) if bulb_is_off else 0
+
             # Ensure all top sequences are in the running list
             for sequence in top_sequences:
                 if (
                     sequence.notify_id is not None
                     and sequence.notify_id not in self._running_sequences
                 ):
+                    sequence.set_initial_hold(warmup_ms / 1000.0)
                     await sequence.run(self.hass, self._config_entry)
                     self._running_sequences[sequence.notify_id] = sequence
 
@@ -913,6 +966,39 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             await self.async_turn_on(**kwargs)
         else:
             await self.async_turn_off(**kwargs)
+
+    async def async_preview_sequence(self, **kwargs: Any) -> None:
+        """Play a preview notification sequence on this light.
+
+        Replaces any currently running preview. Auto-expires after
+        MAX_PREVIEW_DURATION_SEC as a safety cap (browser crash, abandoned
+        config flow, etc.). Call async_stop_preview to clear it sooner.
+        """
+        # Cancel any existing safety-cap timer before replacing the preview.
+        if self._preview_cancel is not None:
+            self._preview_cancel()
+            self._preview_cancel = None
+
+        await self._remove_sequence(PREVIEW_NOTIFY_ID)
+        attrs = {**kwargs, CONF_EXPIRE_ENABLED: False}
+        attrs.pop(CONF_DELAY_TIME, None)
+        sequence = self._create_sequence_from_attr(attrs, PREVIEW_NOTIFY_ID)
+        await self._add_sequence(PREVIEW_NOTIFY_ID, sequence)
+
+        async def _expire_preview(_: Any) -> None:
+            self._preview_cancel = None
+            await self._remove_sequence(PREVIEW_NOTIFY_ID)
+
+        self._preview_cancel = async_call_later(
+            self.hass, MAX_PREVIEW_DURATION_SEC, _expire_preview
+        )
+
+    async def async_stop_preview(self, **kwargs: Any) -> None:
+        """Stop any running preview on this light."""
+        if self._preview_cancel is not None:
+            self._preview_cancel()
+            self._preview_cancel = None
+        await self._remove_sequence(PREVIEW_NOTIFY_ID)
 
     @property
     def capability_attributes(self) -> dict[str, Any] | None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 from typing import Any, Mapping
 from uuid import uuid4
@@ -18,6 +19,7 @@ from homeassistant.config_entries import (
     OptionsFlow,
 )
 from homeassistant.const import (
+    ATTR_ENTITY_ID,
     CONF_DELAY,
     CONF_DELAY_TIME,
     CONF_ENTITIES,
@@ -32,10 +34,12 @@ from homeassistant.helpers import entity_registry as er, selector
 import homeassistant.helpers.config_validation as cv
 
 from .const import (
+    DEFAULT_COLOR_STEP_DELAY_SEC,
     CONF_DELETE,
     CONF_DYNAMIC_PRIORITY,
     CONF_ENABLE_EVENT_LOG,
     CONF_ENTRY,
+    CONF_WARMUP_TIME,
     CONF_EXPIRE_ENABLED,
     CONF_NOTIFY_PATTERN,
     CONF_NTFCTN_ENTRIES,
@@ -44,9 +48,13 @@ from .const import (
     CONF_PRIORITY,
     CONF_RGB_SELECTOR,
     CONF_SUBSCRIPTION,
+    CONF_TEST_ACTION,
+    CONF_TEST_LIGHT,
     DEFAULT_PRIORITY,
     DOMAIN,
     MAXIMUM_PRIORITY,
+    SERVICE_PREVIEW_SEQUENCE,
+    SERVICE_STOP_PREVIEW,
     TYPE_LIGHT,
     TYPE_POOL,
     WARM_WHITE_RGB,
@@ -86,15 +94,15 @@ ADD_NOTIFY_SCHEMA = vol.Schema(
             CONF_DELAY_TIME, default=ADD_NOTIFY_DEFAULTS[CONF_DELAY_TIME]
         ): selector.DurationSelector(selector.DurationSelectorConfig()),
         vol.Optional(
-            CONF_RGB_SELECTOR, default=ADD_NOTIFY_DEFAULTS[CONF_RGB_SELECTOR]
-        ): selector.ColorRGBSelector(),
-        vol.Optional(
             CONF_NOTIFY_PATTERN, default=ADD_NOTIFY_DEFAULTS[CONF_NOTIFY_PATTERN]
         ): selector.TextSelector(
             selector.TextSelectorConfig(
                 multiple=True,
             )
         ),
+        vol.Optional(
+            CONF_RGB_SELECTOR, default=ADD_NOTIFY_DEFAULTS[CONF_RGB_SELECTOR]
+        ): selector.ColorRGBSelector(),
     }
 )
 
@@ -109,6 +117,7 @@ ADD_LIGHT_DEFAULTS = {
     CONF_DELAY_TIME: {"seconds": 5},
     CONF_PEEK_TIME: {"seconds": 5},
     CONF_ENABLE_EVENT_LOG: True,
+    CONF_WARMUP_TIME: 250,
 }
 ADD_LIGHT_SCHEMA = vol.Schema(
     {
@@ -139,6 +148,17 @@ ADD_LIGHT_SCHEMA = vol.Schema(
         vol.Required(
             CONF_ENABLE_EVENT_LOG, default=ADD_LIGHT_DEFAULTS[CONF_ENABLE_EVENT_LOG]
         ): cv.boolean,
+        vol.Optional(
+            CONF_WARMUP_TIME, default=ADD_LIGHT_DEFAULTS[CONF_WARMUP_TIME]
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                mode=selector.NumberSelectorMode.BOX,
+                min=0,
+                max=10000,
+                step=1,
+                unit_of_measurement="ms",
+            )
+        ),
     }
 )
 
@@ -280,6 +300,138 @@ class PoolOptionsFlowHandler(HassDataOptionsFlow):
     def __init__(self, config_entry: ConfigEntry) -> None:
         """Initialize options flow."""
         super().__init__(config_entry)
+        # Tracks which light entity currently has an active preview so we can
+        # stop it before starting a new one on a different light, or on save.
+        self._preview_light: str | None = None
+
+    @callback
+    def async_remove(self) -> None:
+        """Stop any active preview when the flow is closed or cancelled.
+
+        HA calls this synchronously, so we schedule the async stop as a task.
+        """
+        if self._preview_light is not None:
+            self.hass.async_create_task(self._stop_active_preview())
+
+    @callback
+    def _strip_ephemeral_fields(
+        self, user_input: dict[str, Any]
+    ) -> tuple[str | None, str]:
+        """Pop UI-only fields and return (test_light, test_action).
+
+        These fields drive the form action selector but must never be
+        persisted with the notification data.
+        """
+        test_light: str | None = user_input.pop(CONF_TEST_LIGHT, None)
+        test_action: str = user_input.pop(CONF_TEST_ACTION, "save")
+        return test_light, test_action
+
+    @staticmethod
+    def _append_color_to_pattern(user_input: dict[str, Any]) -> None:
+        """Append the current color picker value as a JSON pattern step.
+
+        Mutates user_input[CONF_NOTIFY_PATTERN] in place.
+        """
+        rgb = user_input.get(CONF_RGB_SELECTOR, WARM_WHITE_RGB)
+        new_entry = json.dumps({"rgb": list(rgb), "delay": DEFAULT_COLOR_STEP_DELAY_SEC})
+        current_pattern = list(user_input.get(CONF_NOTIFY_PATTERN) or [])
+        current_pattern.append(new_entry)
+        user_input[CONF_NOTIFY_PATTERN] = current_pattern
+
+    async def _stop_active_preview(self) -> None:
+        """Stop any running preview and clear the tracked light."""
+        if self._preview_light is None:
+            return
+        try:
+            await self.hass.services.async_call(
+                DOMAIN,
+                SERVICE_STOP_PREVIEW,
+                {ATTR_ENTITY_ID: self._preview_light},
+            )
+        except Exception:
+            _LOGGER.warning("Failed to stop preview on %s", self._preview_light)
+        self._preview_light = None
+
+    @callback
+    def _extend_schema_with_test_fields(self, schema: vol.Schema) -> vol.Schema:
+        """Append action-selector and optional test-on-light fields.
+
+        'Add color to pattern' is always available. 'Preview notification on
+        light' and the light selector appear only when at least one ColorNotify
+        light wrapper exists.
+        """
+        light_ids = HassData.get_domain_light_entity_ids(self.hass)
+        options: list[selector.SelectOptionDict] = [
+            selector.SelectOptionDict(value="save", label="Save config and close"),
+            selector.SelectOptionDict(
+                value="add_color", label="Append selected color to pattern"
+            ),
+            *(
+                [
+                    selector.SelectOptionDict(
+                        value="test", label="Preview sequence on selected light"
+                    ),
+                    selector.SelectOptionDict(
+                        value="test_color",
+                        label="Preview solid color on selected light",
+                    ),
+                    selector.SelectOptionDict(
+                        value="stop_preview", label="Stop preview"
+                    ),
+                ]
+                if light_ids
+                else []
+            ),
+        ]
+        return schema.extend(
+            {
+                vol.Required(CONF_TEST_ACTION, default="save"): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=options,
+                        mode=selector.SelectSelectorMode.LIST,
+                    )
+                ),
+                **(
+                    {
+                        vol.Optional(CONF_TEST_LIGHT): selector.EntitySelector(
+                            selector.EntitySelectorConfig(include_entities=light_ids)
+                        )
+                    }
+                    if light_ids
+                    else {}
+                ),
+            }
+        )
+
+    async def _fire_preview_sequence(
+        self,
+        test_light: str,
+        notification_data: dict[str, Any],
+        color_only: bool = False,
+    ) -> None:
+        """Call the preview_sequence service on the selected light wrapper.
+
+        When color_only is True, only the solid color is sent (no pattern),
+        so the user can see what the color picker value looks like on the bulb.
+        Expire settings are intentionally omitted so the service uses its own
+        preview_duration.
+        """
+        service_data: dict[str, Any] = {ATTR_ENTITY_ID: test_light}
+        fields = (
+            (CONF_RGB_SELECTOR, CONF_PRIORITY, CONF_PEEK_ENABLED)
+            if color_only
+            else (CONF_NOTIFY_PATTERN, CONF_RGB_SELECTOR, CONF_PRIORITY, CONF_PEEK_ENABLED)
+        )
+        for key in fields:
+            val = notification_data.get(key)
+            if val is not None:
+                service_data[key] = val
+        try:
+            await self.hass.services.async_call(
+                DOMAIN, SERVICE_PREVIEW_SEQUENCE, service_data
+            )
+        except Exception:
+            _LOGGER.warning("Failed to fire preview sequence on %s", test_light)
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -309,22 +461,81 @@ class PoolOptionsFlowHandler(HassDataOptionsFlow):
         """Launch the Add Notification form."""
         errors: dict[str, str] = {}
         desc_placeholders: dict[str, str] = {}
-        schema = ADD_NOTIFY_SCHEMA
+        test_light: str | None = None
+        test_action: str = "save"
+        schema = self._extend_schema_with_test_fields(ADD_NOTIFY_SCHEMA)
+
         if user_input is not None:
-            # Validate
+            test_light, test_action = self._strip_ephemeral_fields(user_input)
+
+            if test_action == "add_color":
+                # Append the current color picker value as a new pattern entry,
+                # then re-show the form. Skip validation — the user is still
+                # building the pattern.
+                self._append_color_to_pattern(user_input)
+                schema = self.add_suggested_values_to_schema(
+                    schema,
+                    suggested_values=user_input
+                    | {CONF_TEST_ACTION: "save"}
+                    | ({CONF_TEST_LIGHT: test_light} if test_light else {}),
+                )
+                return self.async_show_form(
+                    step_id="add_notification",
+                    data_schema=schema,
+                )
+
+            if test_action == "stop_preview":
+                await self._stop_active_preview()
+                schema = self.add_suggested_values_to_schema(
+                    schema,
+                    suggested_values=user_input | {CONF_TEST_ACTION: "save"},
+                )
+                return self.async_show_form(
+                    step_id="add_notification", data_schema=schema
+                )
+
+            # Validate pattern
             try:
                 LightSequence.create_from_pattern(user_input.get(CONF_NOTIFY_PATTERN))
             except Exception as e:
                 errors["pattern"] = str(e)
                 desc_placeholders["error_detail"] = str(e)
 
-            # If no errors continue
-            if len(errors) == 0:
+            # Validate test-specific requirements
+            if not errors and test_action in ("test", "test_color") and not test_light:
+                errors[CONF_TEST_LIGHT] = "select_test_light"
+
+            if not errors:
+                if test_action in ("test", "test_color"):
+                    # Stop any preview on a different light before starting
+                    if self._preview_light and self._preview_light != test_light:
+                        await self._stop_active_preview()
+                    await self._fire_preview_sequence(
+                        test_light, user_input, color_only=(test_action == "test_color")
+                    )
+                    self._preview_light = test_light
+                    # Re-show form with all values preserved for further testing
+                    schema = self.add_suggested_values_to_schema(
+                        schema,
+                        suggested_values=user_input
+                        | {CONF_TEST_LIGHT: test_light, CONF_TEST_ACTION: test_action},
+                    )
+                    return self.async_show_form(
+                        step_id="add_notification",
+                        data_schema=schema,
+                        errors=errors,
+                        description_placeholders=desc_placeholders,
+                    )
+                # action == "save" — stop any running preview before saving
+                await self._stop_active_preview()
                 return await self.async_step_finish_add_notification(user_input)
 
-            # If errors then load in the set values and show the form again
+            # Re-show form with current values and errors
             schema = self.add_suggested_values_to_schema(
-                schema, suggested_values=user_input
+                schema,
+                suggested_values=user_input
+                | {CONF_TEST_ACTION: test_action}
+                | ({CONF_TEST_LIGHT: test_light} if test_light else {}),
             )
 
         return self.async_show_form(
@@ -351,6 +562,7 @@ class PoolOptionsFlowHandler(HassDataOptionsFlow):
         schema = self.add_suggested_values_to_schema(
             ADD_NOTIFY_SCHEMA, suggested_values=defaults
         )
+        schema = self._extend_schema_with_test_fields(schema)
 
         return self.async_show_form(step_id="add_notification", data_schema=schema)
 
@@ -376,6 +588,7 @@ class PoolOptionsFlowHandler(HassDataOptionsFlow):
             schema = self.add_suggested_values_to_schema(
                 ADD_NOTIFY_SCHEMA, suggested_values=defaults
             )
+            schema = self._extend_schema_with_test_fields(schema)
             return self.async_show_form(step_id="add_notification", data_schema=schema)
 
         # Generate list of notifications from pool to select from
@@ -416,25 +629,70 @@ class PoolOptionsFlowHandler(HassDataOptionsFlow):
 
         errors: dict[str, str] = {}
         desc_placeholders: dict[str, str] = {}
-        if CONF_FORCE_UPDATE in user_input:
-            # Validate
-            try:
-                LightSequence.create_from_pattern(user_input.get(CONF_NOTIFY_PATTERN))
-            except Exception as e:
-                errors["pattern"] = str(e)
-                desc_placeholders["error_detail"] = str(e)
-            # FORCE_UPDATE was just a flag to indicate modification is done
-            if len(errors) == 0:
-                user_input.pop(CONF_FORCE_UPDATE)
-                return await self.async_step_finish_add_notification(user_input)
+        test_light: str | None = None
+        test_action: str = "save"
 
-            # Failed validation, show the form again.
-            item_data.update(user_input)
+        if CONF_FORCE_UPDATE in user_input:
+            test_light, test_action = self._strip_ephemeral_fields(user_input)
+            # Merge submitted values into item_data for all re-show paths
+            merged = {
+                **item_data,
+                **{k: v for k, v in user_input.items() if k != CONF_FORCE_UPDATE},
+            }
+
+            if test_action == "add_color":
+                # Append the current color picker value as a new pattern entry,
+                # then fall through to re-show the form. Skip validation — the
+                # user is still building the pattern.
+                self._append_color_to_pattern(merged)
+                item_data = merged
+                test_action = "save"
+            elif test_action == "stop_preview":
+                await self._stop_active_preview()
+                item_data = merged
+                test_action = "save"
+            else:
+                # Validate
+                try:
+                    LightSequence.create_from_pattern(
+                        user_input.get(CONF_NOTIFY_PATTERN)
+                    )
+                except Exception as e:
+                    errors["pattern"] = str(e)
+                    desc_placeholders["error_detail"] = str(e)
+
+                # Validate test-specific requirements
+                if not errors and test_action in ("test", "test_color") and not test_light:
+                    errors[CONF_TEST_LIGHT] = "select_test_light"
+
+                if not errors:
+                    if test_action in ("test", "test_color"):
+                        # Stop any preview on a different light before starting
+                        if self._preview_light and self._preview_light != test_light:
+                            await self._stop_active_preview()
+                        await self._fire_preview_sequence(
+                            test_light, user_input, color_only=(test_action == "test_color")
+                        )
+                        self._preview_light = test_light
+                        item_data = merged
+                    else:
+                        # FORCE_UPDATE was the flag indicating modification is done
+                        await self._stop_active_preview()
+                        user_input.pop(CONF_FORCE_UPDATE)
+                        return await self.async_step_finish_add_notification(user_input)
+                else:
+                    # Failed validation — re-show submitted values, not last-saved
+                    item_data = merged
 
         # Merge in default values
         item_data = ADD_NOTIFY_DEFAULTS | item_data | {CONF_FORCE_UPDATE: 1}
 
-        # Add in the extra 'Force Update' flag and Unique ID
+        # Carry test field selections through to the re-displayed form
+        if test_light:
+            item_data[CONF_TEST_LIGHT] = test_light
+        item_data[CONF_TEST_ACTION] = test_action
+
+        # Build schema: notification fields + modify sentinels + test fields
         schema = ADD_NOTIFY_SCHEMA.extend(
             {
                 # Flag to indicate modify_notification has been submitted
@@ -446,7 +704,7 @@ class PoolOptionsFlowHandler(HassDataOptionsFlow):
                 ),
             }
         )
-
+        schema = self._extend_schema_with_test_fields(schema)
         schema = self.add_suggested_values_to_schema(schema, suggested_values=item_data)
 
         return self.async_show_form(
@@ -486,7 +744,7 @@ class PoolOptionsFlowHandler(HassDataOptionsFlow):
         user_input = ADD_NOTIFY_DEFAULTS | user_input
         uuid = user_input.get(CONF_UNIQUE_ID)
         if uuid is None:
-            uuid = uuid or uuid4().hex
+            uuid = uuid4().hex
             user_input[CONF_UNIQUE_ID] = uuid
 
         # Add to the entry to hass_data
@@ -533,58 +791,7 @@ class LightOptionsFlowHandler(HassDataOptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Launch the options flow."""
-        return self.async_show_menu(
-            step_id="light_init",
-            menu_options=["light_options", "subscriptions"],
-        )
-
-    async def async_step_light_options(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Show and save the configurable light settings."""
-        if user_input is not None:
-            return await self._async_trigger_conf_update(
-                data=self._config_entry.options
-                | {
-                    CONF_ENABLE_EVENT_LOG: user_input[CONF_ENABLE_EVENT_LOG],
-                    CONF_DYNAMIC_PRIORITY: user_input[CONF_DYNAMIC_PRIORITY],
-                    CONF_PRIORITY: user_input[CONF_PRIORITY],
-                }
-            )
-
-        current = self._config_entry
-        schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_ENABLE_EVENT_LOG,
-                    default=current.options.get(
-                        CONF_ENABLE_EVENT_LOG,
-                        current.data.get(CONF_ENABLE_EVENT_LOG, True),
-                    ),
-                ): cv.boolean,
-                vol.Required(
-                    CONF_DYNAMIC_PRIORITY,
-                    default=current.options.get(
-                        CONF_DYNAMIC_PRIORITY,
-                        current.data.get(CONF_DYNAMIC_PRIORITY, True),
-                    ),
-                ): cv.boolean,
-                vol.Optional(
-                    CONF_PRIORITY,
-                    default=current.options.get(
-                        CONF_PRIORITY,
-                        current.data.get(CONF_PRIORITY, DEFAULT_PRIORITY),
-                    ),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        mode=selector.NumberSelectorMode.BOX,
-                        min=1,
-                        max=MAXIMUM_PRIORITY,
-                    )
-                ),
-            }
-        )
-        return self.async_show_form(step_id="light_options", data_schema=schema)
+        return await self.async_step_subscriptions(user_input)
 
     async def async_step_subscriptions(
         self, user_input: dict[str, Any] | None = None

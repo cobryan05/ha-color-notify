@@ -11,76 +11,166 @@
       "user": {
         "title": "Select an type to create",
         "menu_options": {
-          "new_pool": "New Notification Collection",
+          "new_pool": "New Notification Pool",
           "new_light": "New Light"
         },
         "data": {
           "entity_id": "Light to use",
-          "name": "Name of new Notifiaction Light"
+          "name": "Name of new Notification Light",
+          "unique_id": ""
         }
       },
       "new_pool": {
-        "title": "Pick a name for the new collection",
+        "title": "Pick a name for the new pool",
         "data": {
-          "name": "Collection name"
+          "name": "Pool name",
+          "unique_id": ""
         }
       },
       "new_light": {
+        "title": "Set up the new notification light wrapper",
         "data": {
-          "enable_event_log": "Enable event log"
+          "name": "Notification Light Name",
+          "entity_id": "Light Entity To Use",
+          "color_picker": "Default 'On' color of light",
+          "priority": "Minimum 'On' priority.",
+          "dynamic_priority": "Dynamic 'On' Priority (inherit active light priority + 0.5 when switched on)",
+          "peek_time": "Duration to temporarily display lower-priority notifications",
+          "delay": "Auto-cycle between same priority notifications",
+          "delay_time": "Auto-cycle delay",
+          "enable_event_log": "Enable event logging entity",
+          "warmup_time": "Warmup time (ms)"
+        },
+        "data_description": {
+          "warmup_time": "Extra hold time for the initial color if the bulb was off when the notification started. Use this for bulbs that are slow to turn on."
+        }
+      },
+      "reconfigure_light": {
+        "title": "Update light settings",
+        "data": {
+          "name": "Notification Light Name",
+          "entity_id": "Light Entity To Use",
+          "color_picker": "Default 'On' color of light",
+          "priority": "Minimum 'On' priority.",
+          "dynamic_priority": "Dynamic 'On' Priority (inherit active light priority + 0.5 when switched on)",
+          "peek_time": "Duration to temporarily display lower-priority notifications",
+          "delay": "Auto-cycle between same priority notifications",
+          "delay_time": "Auto-cycle delay",
+          "enable_event_log": "Enable event logging entity",
+          "warmup_time": "Warmup time (ms)"
+        },
+        "data_description": {
+          "warmup_time": "Extra hold time for the initial color if the bulb was off when the notification started. Use this for bulbs that are slow to turn on."
+        }
+      }
+    }
+  },
+  "services": {
+    "stop_preview": {
+      "name": "Stop preview",
+      "description": "Stop any running preview sequence on a ColorNotify light wrapper."
+    },
+    "preview_sequence": {
+      "name": "Preview sequence",
+      "description": "Play a temporary notification sequence on a ColorNotify light wrapper to preview what it will look like.",
+      "fields": {
+        "pattern": {
+          "name": "Pattern",
+          "description": "List of pattern entries (JSON color objects, '[', or '],N')."
+        },
+        "color_picker": {
+          "name": "Color",
+          "description": "Solid RGB color used when no pattern is provided."
+        },
+        "priority": {
+          "name": "Priority",
+          "description": "Priority of the preview notification."
+        },
+        "peek_enabled": {
+          "name": "Peek enabled",
+          "description": "Temporarily boost priority on activation."
+        },
+        "preview_duration": {
+          "name": "Preview duration",
+          "description": "Seconds before the preview automatically clears."
         }
       }
     }
   },
   "options": {
+    "error": {
+      "select_test_light": "Select a light to preview the sequence on"
+    },
     "step": {
-      "light_init": {
-        "description": "Configure light",
-        "menu_options": {
-          "light_options": "Change light settings",
-          "subscriptions": "Modify subscriptions"
-        }
-      },
-      "light_options": {
-        "description": "Change light settings",
-        "data": {
-          "enable_event_log": "Enable event log",
-          "dynamic_priority": "Dynamic 'On' priority",
-          "priority": "Minimum 'On' priority"
-        }
-      },
       "pool_init": {
         "description": "Configure Pool Items",
         "menu_options": {
           "add_notification": "Create a new notification",
-          "add_notification_sample": "Create a new notification (with pattern sample)",
+          "add_notification_sample": "Create a new notification (with sample pattern)",
+          "add_notification_copy": "Create a new notification (copy an existing)",
           "modify_notification_select": "Modify an existing notification",
           "delete_notification": "Delete existing notifications"
         }
       },
       "add_notification": {
-        "description": "Set up the new notification below.\nColor Picker can set a solid color or look up #RRGGBB values for pattern use.\nCreate a pattern by using the +Add button (see sample flow)\nAuto-Clear with a 0s timeout clears immediately after pattern finishes.\nLarger numbers are higher priority.",
+        "description": "Set up the notification below.\n&bull;Auto-Clear with a 0s timeout clears immediately after the pattern finishes.\n&bull;Any other timeout is measured from notification start.\n&bull;Larger numbers are higher priority.",
         "data": {
           "name": "Name for notification",
           "expire_enabled": "Automatically clear after timeout?",
           "delay_time": "Auto-clear timeout",
-          "pattern": "'#0000FF', '#FF0000,10', '[' or '], loopcnt'",
-          "color_picker": "Select a color, or '+Add' pattern"
+          "pattern": "eg, '[' or '], loopcnt' or '{{\"rgb\": [255,0,0], \"delay\": 1.5}}'",
+          "color_picker": "Solid color",
+          "peek_enabled": "Temporarily show on activation, regardless of priority.",
+          "unique_id": "",
+          "test_action": "Submit action",
+          "test_light": "Preview light"
+        },
+        "data_description": {
+          "pattern": "Each '+' entry is a color step. Use '[' to open a loop and '], N' to close it (N = 0 for infinite). Leave empty to show a solid color instead.",
+          "color_picker": "If no pattern steps are defined above, this color is the notification's display color. To add this color as a step in the sequence, choose 'Append selected color to pattern' below."
+        }
+      },
+      "add_notification_copy": {
+        "description": "Copy an existing notification.",
+        "data": {
+          "unique_id": "Select a notification"
         }
       },
       "modify_notification_select": {
         "description": "Modify an existing notification.",
         "data": {
-          "unique_id": "Select the notification to modify."
+          "unique_id": "Select a notification"
         }
       },
       "modify_notification": {
-        "description": "Set up the notification below.\nColor Picker can set a solid color or look up #RRGGBB values for pattern use.\nCreate a pattern by using the +Add button.\nAuto-Clear with a 0s timeout clears immediately after pattern finishes.\nLarger numbers are higher priority."
+        "description": "Set up the notification below.\n&bull;Auto-Clear with a 0s timeout clears immediately after the pattern finishes.\n&bull;Any other timeout is measured from notification start.\n&bull;Larger numbers are higher priority.",
+        "data": {
+          "name": "Name for notification",
+          "expire_enabled": "Automatically clear after timeout?",
+          "delay_time": "Auto-clear timeout",
+          "pattern": "eg, '[' or '], loopcnt' or '{{\"rgb\": [255,0,0], \"delay\": 1.5}}'",
+          "color_picker": "Solid color",
+          "peek_enabled": "Temporarily show on activation, regardless of priority.",
+          "unique_id": "",
+          "test_action": "Submit action",
+          "test_light": "Preview light"
+        },
+        "data_description": {
+          "pattern": "Each '+' entry is a color step. Use '[' to open a loop and '], N' to close it (N = 0 for infinite). Leave empty to show a solid color instead.",
+          "color_picker": "If no pattern steps are defined above, this color is the notification's display color. To add this color as a step in the sequence, choose 'Append selected color to pattern' below."
+        }
       },
       "delete_notification": {
         "description": "Delete existing notifications.",
         "data": {
-          "delete_uuids": "Select items to delete"
+          "delete": "Select notifications to delete"
+        }
+      },
+      "subscriptions": {
+        "description": "Subscribe to entire pools and/or individual notifications\nUse 'Reconfigure' to update other bulb settings.",
+        "data": {
+          "pool": "Notification Pools",
+          "entities": "Individual Notifications"
         }
       }
     }
