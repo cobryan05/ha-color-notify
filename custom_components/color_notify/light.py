@@ -1,14 +1,11 @@
 """Light platform for ColorNotify integration."""
 
 import asyncio
-import contextlib
-import time
-from collections.abc import Callable, Coroutine
-from copy import copy
-from dataclasses import dataclass
+from collections.abc import Callable
 from datetime import timedelta
 from functools import cached_property
 import logging
+import time
 from typing import Any
 
 import voluptuous as vol
@@ -26,7 +23,6 @@ from homeassistant.components.light import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ATTR_ENTITY_ID,
-    CONF_DELAY,
     CONF_DELAY_TIME,
     CONF_ENTITIES,
     CONF_ENTITY_ID,
@@ -37,8 +33,8 @@ from homeassistant.const import (
     Platform,
 )
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
-import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers import entity_platform, entity_registry as er
+import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -52,37 +48,53 @@ from homeassistant.util.color import (
 )
 
 from .const import (
-    ACTION_CYCLE_SAME,
-    CONF_ADD,
-    CONF_DELETE,
     CONF_DYNAMIC_PRIORITY,
     CONF_ENABLE_EVENT_LOG,
     CONF_EVENT_ENTITY,
     CONF_EXPIRE_ENABLED,
     CONF_NOTIFY_PATTERN,
     CONF_PEEK_ENABLED,
-    CONF_PEEK_TIME,
     CONF_PRIORITY,
-    CONF_WARMUP_TIME,
-    MAX_PREVIEW_DURATION_SEC,
-    PREVIEW_NOTIFY_ID,
-    SERVICE_STOP_PREVIEW,
     CONF_RGB_SELECTOR,
     CONF_SUBSCRIPTION,
     DEFAULT_PRIORITY,
     EXPECTED_SERVICE_CALL_TIMEOUT,
     INIT_STATE_UPDATE_DELAY_SEC,
+    MAX_PREVIEW_DURATION_SEC,
     MAXIMUM_PRIORITY,
     OFF_RGB,
+    PREVIEW_NOTIFY_ID,
     SERVICE_PREVIEW_SEQUENCE,
+    SERVICE_STOP_PREVIEW,
     TYPE_POOL,
     WARM_WHITE_RGB,
 )
+from .models import ActiveNotification, NotificationConfig
 from .sensor import ColorNotifyLogEntity
 from .utils.hass_data import HassData
-from .utils.light_sequence import ColorInfo, LightSequence
+from .utils.light_sequence import ColorInfo
+from .utils.notification_manager import NotificationManager
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _NotificationSequence(
+    pattern: list,
+    priority: int = DEFAULT_PRIORITY,
+    notify_id: str | None = None,
+    clear_delay: float | None = None,
+    peek_enabled: bool = True,
+) -> ActiveNotification:
+    """Backward-compat factory — prefer ActiveNotification(NotificationConfig(...)) directly."""
+    return ActiveNotification(
+        NotificationConfig(
+            priority=priority,
+            notify_id=notify_id,
+            pattern=pattern,
+            peek_enabled=peek_enabled,
+            clear_delay=clear_delay,
+        )
+    )
 
 # Schema for the preview_sequence entity service.  All fields are optional so
 # callers can pass only what they have (e.g. just a pattern, or just a color).
@@ -96,6 +108,26 @@ SERVICE_PREVIEW_SEQUENCE_SCHEMA: dict = {
     vol.Optional(CONF_EXPIRE_ENABLED, default=False): cv.boolean,
     vol.Optional(CONF_DELAY_TIME): dict,
 }
+
+# Module-level sentinel sequences — always present in every light's queue.
+LIGHT_OFF_SEQUENCE = ActiveNotification(
+    NotificationConfig(
+        notify_id=STATE_OFF,
+        pattern=[ColorInfo(OFF_RGB, 0)],
+        priority=0,
+        peek_enabled=False,
+        clear_delay=None,
+    )
+)
+LIGHT_ON_SEQUENCE = ActiveNotification(
+    NotificationConfig(
+        notify_id=STATE_ON,
+        pattern=[ColorInfo(WARM_WHITE_RGB, 255)],
+        priority=DEFAULT_PRIORITY,
+        peek_enabled=False,
+        clear_delay=None,
+    )
+)
 
 
 async def async_setup_entry(
@@ -118,7 +150,9 @@ async def async_setup_entry(
     if enable_log:
         log_entity = ColorNotifyLogEntity(unique_id, config_entry)
         runtime_data[CONF_EVENT_ENTITY] = log_entity
-    new_entity = NotificationLightEntity(unique_id, wrapped_entity_id, config_entry, log_entity)
+    new_entity = NotificationLightEntity(
+        unique_id, wrapped_entity_id, config_entry, log_entity
+    )
     runtime_data[CONF_ENTITIES] = new_entity
     async_add_entities([new_entity])
 
@@ -136,148 +170,8 @@ async def async_setup_entry(
     )
 
 
-@dataclass
-class _NotificationSequence:
-    """A color sequence to queue on the light."""
-
-    def __init__(
-        self,
-        pattern: list[str | ColorInfo],
-        priority: int = DEFAULT_PRIORITY,
-        notify_id: str | None = None,
-        clear_delay: float | None = None,
-        peek_enabled: bool = True,
-    ) -> None:
-        self.priority: int = priority
-
-        self._pattern: list[str | ColorInfo] = pattern[:]
-        self._sequence: LightSequence = LightSequence()
-        self._notify_id: str | None = notify_id
-        self._clear_delay: float | None = clear_delay
-        self._task: asyncio.Task | None = None
-        self._stop_event: asyncio.Event | None = None
-        self._color: ColorInfo = ColorInfo(OFF_RGB, 0)
-        self._peek_enabled: bool = peek_enabled
-        self._step_finished: asyncio.Event = asyncio.Event()
-        self._step_finished.set()
-        self._initial_hold_sec: float = 0.0
-        self.reset()  # Set initial color from pattern
-
-    def __repr__(self) -> str:
-        return f"Animation Pri: {self.priority} Sequence: {self._sequence}"
-
-    @property
-    def peek_enabled(self) -> bool:
-        return self._peek_enabled
-
-    @property
-    def color(self) -> ColorInfo:
-        return copy(self._color)
-
-    @property
-    def notify_id(self) -> str | None:
-        return self._notify_id
-
-    def wait(self) -> Coroutine:
-        return self._step_finished.wait()
-
-    def reset(self):
-        """Resets the notification sequence to the beginning"""
-        self._sequence: LightSequence = LightSequence.create_from_pattern(self._pattern)
-        self._color: ColorInfo = (
-            self._sequence.color
-            if self._sequence.color is not None
-            else ColorInfo(OFF_RGB, 0)
-        )
-
-    def set_initial_hold(self, seconds: float) -> None:
-        """Set extra hold time for the first color step (e.g. bulb warm-up)."""
-        self._initial_hold_sec = seconds
-
-    async def _worker_func(self, stop_event: asyncio.Event):
-        """Coroutine to run the animation until finished or interrupted."""
-        # TODO: Is this extra task needed around sequence?
-        done = False
-
-        # Read in the pattern and init
-        self.reset()
-        hold_delay = self._initial_hold_sec
-        try:
-            while not done and not stop_event.is_set():
-                self._step_finished.clear()
-                done = await self._sequence.runNextStep()
-                if not stop_event.is_set():  # Don't update if we were interrupted
-                    self._color = self._sequence.color
-                if hold_delay > 0 and not stop_event.is_set():
-                    with contextlib.suppress(asyncio.TimeoutError):
-                        await asyncio.wait_for(stop_event.wait(), timeout=hold_delay)
-                    hold_delay = 0
-                self._step_finished.set()
-        except Exception as e:
-            _LOGGER.exception("Failed running NotificationAnimation")
-        # Autoclear after animation if delay is 0
-        if self._clear_delay == 0:
-            await self._hass.services.async_call(
-                Platform.SWITCH,
-                SERVICE_TURN_OFF,
-                service_data={ATTR_ENTITY_ID: self._notify_id},
-            )
-
-    async def run(self, hass: HomeAssistant, config_entry: ConfigEntry):
-        if self._stop_event:
-            self._stop_event.set()
-        self._stop_event = asyncio.Event()
-        self._color = self._sequence.color
-        self._hass = hass
-        self._task = config_entry.async_create_background_task(
-            hass, self._worker_func(self._stop_event), name="Animation worker"
-        )
-
-    async def stop(self):
-        if self._stop_event:
-            self._stop_event.set()
-
-    def is_running(self) -> bool:
-        return bool(
-            self._task
-            and not self._task.done()
-            and self._stop_event
-            and not self._stop_event.is_set()
-        )
-
-    @property
-    def loops_forever(self) -> bool:
-        """Return if the loop never ends."""
-        return self._sequence.loops_forever
-
-    @property
-    def clear_delay(self) -> float | None:
-        """Return number of seconds to auto-clear."""
-        return self._clear_delay
-
-
-LIGHT_OFF_SEQUENCE = _NotificationSequence(
-    notify_id=STATE_OFF,
-    pattern=[ColorInfo(OFF_RGB, 0)],
-    priority=0,
-)
-LIGHT_ON_SEQUENCE = _NotificationSequence(
-    notify_id=STATE_ON,
-    pattern=[ColorInfo(WARM_WHITE_RGB, 255)],
-    priority=DEFAULT_PRIORITY,
-)
-
-
-@dataclass
-class _QueueEntry:
-    action: str | None = None
-    notify_id: str | None = None
-    sequence: _NotificationSequence | None = None
-    log_trigger: str | None = None
-
-
 class NotificationLightEntity(LightEntity, RestoreEntity):
-    """ColorNotify Light entity."""
+    """ColorNotify Light entity — thin HA shell backed by NotificationManager."""
 
     _attr_should_poll = False
 
@@ -297,16 +191,10 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         self._config_entry: ConfigEntry = config_entry
         self._event_logger: ColorNotifyLogEntity | None = log_entity
 
-        self._running_sequences: dict[str, _NotificationSequence] = {}
-        self._active_sequences: dict[str, _NotificationSequence] = {}
-        self._last_set_color: ColorInfo | None = None
-        self._dynamic_priority: bool = self._config_entry.options.get(
+        self._dynamic_priority: bool = config_entry.options.get(
             CONF_DYNAMIC_PRIORITY, True
         )
         self._response_expected_expire_time: float = 0.0
-
-        self._task_queue: asyncio.Queue[_QueueEntry] = asyncio.Queue()
-        self._task: asyncio.Task | None = None
         self._preview_cancel: Callable | None = None
 
         self._light_on_priority: int = config_entry.options.get(
@@ -317,19 +205,103 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         )
         self._last_brightness: int = 255
 
-    async def async_added_to_hass(self):
+        # Manager is created here (before hass is available) so that
+        # _active_sequences and related attrs exist immediately.
+        self._manager = NotificationManager(
+            config_entry=config_entry,
+            get_hass=lambda: self.hass,
+            wrapped_entity_id=wrapped_entity_id,
+            on_color_change=lambda **kw: self._wrapped_light_turn_on(**kw),
+            event_logger=log_entity,
+            entity_name=config_entry.title,
+        )
+
+    # ------------------------------------------------------------------
+    # Delegation — expose manager internals consumed by tests and entity methods
+    # ------------------------------------------------------------------
+
+    @property
+    def _active_sequences(self) -> dict[str, ActiveNotification]:
+        return self._manager._active_sequences  # noqa: SLF001
+
+    @_active_sequences.setter
+    def _active_sequences(self, value: dict[str, ActiveNotification]) -> None:
+        self._manager._active_sequences = value  # noqa: SLF001
+
+    @property
+    def _running_sequences(self) -> dict[str, ActiveNotification]:
+        return self._manager._running_sequences  # noqa: SLF001
+
+    @callback
+    def _sort_active_sequences(self) -> None:
+        self._manager._sort_active_sequences()  # noqa: SLF001
+
+    @callback
+    def _get_top_sequences(self) -> list[ActiveNotification]:
+        return self._manager._get_top_sequences()  # noqa: SLF001
+
+    @property
+    def _task_queue(self) -> asyncio.Queue:
+        return self._manager._task_queue  # noqa: SLF001
+
+    @property
+    def _last_set_color(self) -> ColorInfo | None:
+        return self._manager._last_set_color  # noqa: SLF001
+
+    @_last_set_color.setter
+    def _last_set_color(self, value: ColorInfo | None) -> None:
+        self._manager._last_set_color = value  # noqa: SLF001
+
+    async def _reset_running_sequences(self) -> None:
+        await self._manager._reset_running_sequences()  # noqa: SLF001
+
+    async def _process_sequence_list(self, log_trigger: str | None = None) -> None:
+        await self._manager._process_sequence_list(log_trigger)  # noqa: SLF001
+
+    async def _add_sequence(
+        self,
+        notify_id: str,
+        notification: ActiveNotification,
+        log_trigger: str | None = None,
+    ) -> None:
+        """Enqueue adding a notification sequence."""
+        await self._manager.add_notification(notify_id, notification, log_trigger)
+
+    async def _remove_sequence(
+        self, notify_id: str, log_trigger: str | None = None
+    ) -> None:
+        """Enqueue removing a notification sequence."""
+        await self._manager.remove_notification(notify_id, log_trigger)
+
+    # ------------------------------------------------------------------
+    # HA lifecycle
+    # ------------------------------------------------------------------
+
+    async def async_added_to_hass(self) -> None:
         """Set up before initially adding to HASS."""
         await super().async_added_to_hass()
 
-        # Add the 'OFF' sequence so the list isn't empty
-        self._active_sequences[STATE_OFF] = LIGHT_OFF_SEQUENCE
+        # Add a per-entity 'OFF' sequence so the list is never empty.
+        # A fresh instance is created here rather than using the module-level
+        # LIGHT_OFF_SEQUENCE singleton; ActiveNotification carries mutable runtime
+        # state (_task, _stop_event) so sharing one instance across entities would
+        # cause each entity's run() to cancel the previous entity's animation.
+        self._active_sequences[STATE_OFF] = ActiveNotification(
+            NotificationConfig(
+                notify_id=STATE_OFF,
+                pattern=[ColorInfo(OFF_RGB, 0)],
+                priority=0,
+                peek_enabled=False,
+                clear_delay=None,
+            )
+        )
 
-        # Check if the wrapped entity is valid at startup
+        # Check if the wrapped entity is valid at startup.
         state = self.hass.states.get(self._wrapped_entity_id)
         if state:
             await self._handle_wrapped_light_init()
 
-        # Subscribe to notifications
+        # Subscribe to wrapped-light state changes.
         self._config_entry.async_on_unload(
             async_track_state_change_event(
                 self.hass, self._wrapped_entity_id, self._handle_wrapped_light_change
@@ -341,13 +313,10 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         entity_subs: list[str] = subs.get(CONF_ENTITIES, [])
 
         async def delay_fire_initial_events(_) -> None:
-            """Fire state change notifications for all subscribed events."""
             nonlocal pool_subs
             nonlocal entity_subs
             already_fired: set[str] = set()
-            # Subscribe to the pool by adding _handle_notification_change to pool callbacks list
             for pool in pool_subs:
-                # Fire state_changed to get initial notification state
                 for notif in HassData.get_all_entities(self.hass, pool).values():
                     if notif.entity_id in already_fired:
                         continue
@@ -360,9 +329,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
                             "old_state": None,
                         },
                     )
-
             for entity in entity_subs:
-                # Fire state_changed to get initial notification state
                 if entity in already_fired:
                     continue
                 already_fired.add(entity)
@@ -381,7 +348,6 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
                     },
                 )
 
-        # Subscribe to the pool by adding _handle_notification_change to pool callbacks list
         for pool in pool_subs:
             pool_callbacks: set[Callable] = HassData.get_config_entry_runtime_data(
                 pool
@@ -395,7 +361,6 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
                 )
             )
 
-        # Delay fire the initial events in case the light entity was created before the subscribed state entities
         async_call_later(
             self.hass, INIT_STATE_UPDATE_DELAY_SEC, delay_fire_initial_events
         )
@@ -413,438 +378,30 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             else:
                 self.hass.async_create_task(self.async_turn_off())
 
-        # Spawn the worker function background task to manage this bulb.
-        # This must happen after state restore to avoid racing with initialization.
-        self._task = self._config_entry.async_create_background_task(
-            self.hass, self._worker_func(), name=f"{self.name} background task"
-        )
+        # Start the background worker. Must happen after state restore to avoid
+        # racing with initialization.
+        self._manager.start()
 
-    async def async_will_remove_from_hass(self):
+    async def async_will_remove_from_hass(self) -> None:
         """Clean up before removal from HASS."""
-        if self._task:
-            self._task.cancel()
+        self._manager.stop()
 
-        # Unsubscribe any 'pool' subscriptions
-
-        pool_subs: list[str] = self._config_entry.options.get(TYPE_POOL, [])
+        subs = self._config_entry.options.get(CONF_SUBSCRIPTION, {})
+        pool_subs: list[str] = subs.get(TYPE_POOL, [])
         for pool_entry_id in pool_subs:
             pool_callbacks: set[Callable] = HassData.get_config_entry_runtime_data(
                 pool_entry_id
             ).setdefault(CONF_SUBSCRIPTION, set())
-            if self._handle_notification_change in pool_callbacks:
-                pool_callbacks.remove(self._handle_notification_change)
+            pool_callbacks.discard(self._handle_notification_change)
 
-    @callback
-    def _get_sequence_step_events(self) -> set:
-        """Return awaitable events for the sequences on the current light."""
-        return {
-            anim.wait()
-            for anim in self._running_sequences.values()
-            if anim and anim.is_running()
-        }
+    # ------------------------------------------------------------------
+    # Wrapped-light helpers
+    # ------------------------------------------------------------------
 
-    @callback
-    def _sort_active_sequences(self) -> None:
-        self._active_sequences = dict(
-            sorted(
-                self._active_sequences.items(),
-                key=lambda item: -item[1].priority,
-            )
-        )
-
-    @callback
-    def _get_top_sequences(self) -> list[_NotificationSequence]:
-        """Return the list of top priority active sequences."""
-        ret: list[_NotificationSequence] = []
-        top_prio: int = 0
-        for sequence in self._active_sequences.values():
-            if sequence.priority < top_prio:
-                break
-            top_prio = sequence.priority
-            ret.append(sequence)
-        return ret
-
-    async def _process_sequence_list(self, log_trigger: str | None = None) -> None:
-        """Process the sequence list for the current display color and set it on the bulb."""
-        top_sequences: list[_NotificationSequence] = self._get_top_sequences()
-        if len(top_sequences) > 0:
-            top_sequence = top_sequences[0]
-            top_priority = top_sequence.priority
-
-            # Log the notification event with the current display state.
-            self._log_display_state(top_sequences, log_trigger)
-
-            wrapped_state = self.hass.states.get(self._wrapped_entity_id)
-            bulb_is_off = wrapped_state is None or wrapped_state.state != STATE_ON
-            warmup_ms: int = self._config_entry.data.get(CONF_WARMUP_TIME, 0) if bulb_is_off else 0
-
-            # Ensure all top sequences are in the running list
-            for sequence in top_sequences:
-                if (
-                    sequence.notify_id is not None
-                    and sequence.notify_id not in self._running_sequences
-                ):
-                    sequence.set_initial_hold(warmup_ms / 1000.0)
-                    await sequence.run(self.hass, self._config_entry)
-                    self._running_sequences[sequence.notify_id] = sequence
-
-            # Stop any sequences that are not top priority
-            remove_list = {
-                notify_id: anim
-                for notify_id, anim in self._running_sequences.items()
-                if notify_id not in self._active_sequences
-                or (anim is not None and anim.priority < top_priority)
-            }
-
-            # Stop animations that are lower priority than the current
-            for seq_id, anim in remove_list.items():
-                if anim:
-                    await anim.stop()
-                self._running_sequences.pop(seq_id)
-
-            # TODO: color mixing between active sequences? For now just show the top sequence.
-            # # Now combine the colors
-            # colors = [
-            #     anim.color
-            #     for anim in self._running_sequences.values()
-            #     if anim is not None
-            # ]
-            # color = NotificationLightEntity.mix_colors(colors)
-            color = top_sequence.color
-            if color != self._last_set_color:
-                if await self._wrapped_light_turn_on(**color.light_params):
-                    self._last_set_color = color
-                else:
-                    _LOGGER.error(
-                        "%s failed to set wrapped light, real state unknown", self.name
-                    )
-                    await asyncio.sleep(INIT_STATE_UPDATE_DELAY_SEC)
-                    await self._reset_running_sequences()
-
-        else:
-            _LOGGER.error("Sequence list empty for %s", self.name)
-
-    async def _worker_func(self):
-        """Try/Except wrapper around inner work loop."""
-        while True:
-            try:
-                await self._work_loop()
-            except asyncio.CancelledError:
-                break
-            except Exception as _:
-                _LOGGER.exception("Error running %s worker!", self.name)
-
-    async def _work_loop(self):
-        """Worker loop to manage light."""
-        # Wait until the list is not empty
-        entry_data = self._config_entry.data
-        q_task: asyncio.Task | None = None
-        cycle_canceler: Callable | None = None
-        cycle_delay_time = entry_data.get(CONF_DELAY_TIME)
-        cycle_delay_enabled = entry_data.get(CONF_DELAY, False)
-        cycle_delay: timedelta | None = (
-            timedelta(**cycle_delay_time)
-            if cycle_delay_time is not None and cycle_delay_enabled
-            else None
-        )
-        peek_duration_time = entry_data.get(CONF_PEEK_TIME)
-        peek_duration: int = (
-            timedelta(**peek_duration_time).seconds
-            if peek_duration_time is not None
-            else 0
-        )
-
-        pending_trigger: str | None = None
-        while True:
-            # Update the bulb based off the current sequence list
-            await self._process_sequence_list(log_trigger=pending_trigger)
-            pending_trigger = None
-
-            # Schedule cycling through same-priority notifications
-            if (
-                cycle_delay
-                and cycle_canceler is None
-                and len(self._running_sequences) > 1
-            ):
-
-                async def queue_cycle(_):
-                    nonlocal cycle_canceler
-                    cycle_canceler = None
-                    if len(self._running_sequences) > 1:
-                        await self._task_queue.put(_QueueEntry(ACTION_CYCLE_SAME))
-
-                cycle_canceler = async_call_later(self.hass, cycle_delay, queue_cycle)
-
-            # Now wait for a command or for an animation step
-            if q_task is None or q_task.done():
-                q_task = asyncio.create_task(self._task_queue.get())
-            wait_tasks = [
-                asyncio.create_task(x) for x in self._get_sequence_step_events()
-            ]
-            wait_tasks.append(q_task)
-            done, pending = await asyncio.wait(
-                wait_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if q_task in done:
-                item: _QueueEntry = await q_task
-                _LOGGER.info(
-                    "[%s] Got queue item: [%s]", self._config_entry.title, item
-                )
-                if item.action == CONF_DELETE:
-                    if item.notify_id in self._active_sequences:
-                        anim = self._active_sequences.pop(item.notify_id)
-                        if item.notify_id in self._running_sequences:
-                            await anim.stop()
-                            self._running_sequences.pop(item.notify_id)
-
-                if item.action == CONF_ADD and item.sequence:
-                    if item.notify_id in self._active_sequences:
-                        _LOGGER.warning("%s already in active list", item.notify_id)
-
-                    # Temporarily give high priority for peeks, but only when
-                    # needed: skip the boost when this notification's natural
-                    # priority is already at or above the current top, so it
-                    # would show without any boost.
-                    # _active_sequences is kept sorted descending, so the first
-                    # value is always the current top priority.
-                    current_top_priority = next(
-                        iter(self._active_sequences.values())
-                    ).priority
-                    # Strict less-than: a tie means the new notification
-                    # joins the existing same-priority rotation rather than
-                    # peeking in front of it.
-                    if (
-                        peek_duration > 0
-                        and item.sequence.peek_enabled
-                        and item.notify_id != STATE_OFF
-                        and item.sequence.priority <= current_top_priority
-                    ):
-                        auto_clears = (
-                            item.sequence.clear_delay == 0
-                            and not item.sequence.loops_forever
-                        )
-                        original_priority = item.sequence.priority
-                        item.sequence.priority += MAXIMUM_PRIORITY
-                        _LOGGER.debug(
-                            "Boosting %s priority to %d for %f seconds",
-                            item.notify_id,
-                            item.sequence.priority,
-                            peek_duration,
-                        )
-                        if not auto_clears:
-                            async def restore_priority(
-                                _,
-                                priority=original_priority,
-                                notify_id=item.notify_id,
-                            ):
-                                # Restore the priority and wake the event loop to resort the notifications
-                                sequence = self._active_sequences.get(notify_id)
-                                if sequence is not None:
-                                    sequence.priority = priority
-                                    _LOGGER.debug(
-                                        "Restoring %s priority to %d",
-                                        notify_id,
-                                        sequence.priority,
-                                    )
-                                    self._sort_active_sequences()
-                                    trigger = (
-                                        f"{self._friendly_name(notify_id)}"
-                                        f" (pri {priority}) peek expired"
-                                    )
-                                    await self._wake_loop(log_trigger=trigger)
-                            async_call_later(self.hass, peek_duration, restore_priority)
-
-                    # Add the new sequence in, sorted by priority
-                    self._active_sequences[item.notify_id] = item.sequence
-                    self._sort_active_sequences()
-
-                if item.action == ACTION_CYCLE_SAME and self._active_sequences:
-                    # Copy the top-priority items in the sequence list.
-                    it = iter(self._active_sequences.items())
-                    new_dict = {}
-                    top_id, top_seq = next(it)
-                    if top_id != STATE_OFF:
-                        top_prio = top_seq.priority
-                        for it_id, it_seq in it:
-                            if top_prio > it_seq.priority:
-                                new_dict[top_id] = top_seq
-                                top_prio = -1
-                            new_dict[it_id] = it_seq
-                        self._active_sequences = new_dict
-
-                if item.log_trigger is not None:
-                    pending_trigger = item.log_trigger
-                self._task_queue.task_done()
-
-    @callback
-    @staticmethod
-    def mix_colors(
-        colors: list[ColorInfo], weights: list[float] | None = None
-    ) -> ColorInfo:
-        """Mix a list of RGB colors with their respective brightness and weight values."""
-        if weights is None:
-            weights = [1.0] * len(colors)
-
-        # Normalize the weights so they sum to 1
-        total_weight = sum(weights)
-        normalized_weights = [w / total_weight for w in weights]
-
-        # Initialize accumulators for the weighted RGB values
-        r_total, g_total, b_total, brightness_total = 0.0, 0.0, 0.0, 0.0
-
-        # Calculate the weighted average of RGB channels
-        for color, weight in zip(colors, normalized_weights, strict=True):
-            r, g, b = color.rgb
-            # Apply brightness scaling to each color
-            r_total += r * weight
-            g_total += g * weight
-            b_total += b * weight
-            brightness_total += color.brightness * weight
-
-        # Ensure RGB values are within the valid range [0, 255]
-        r = min(int(round(r_total)), 255)
-        g = min(int(round(g_total)), 255)
-        b = min(int(round(b_total)), 255)
-        brightness_total = min(int(round(brightness_total)), 255)
-
-        return ColorInfo((r, g, b), brightness_total)
-
-    async def _wake_loop(self, log_trigger: str | None = None) -> None:
-        """Wake the event loop to process light sequences."""
-        await self._task_queue.put(_QueueEntry(action=None, notify_id=None, log_trigger=log_trigger))
-
-    async def _add_sequence(
-        self, notify_id: str, sequence: _NotificationSequence, log_trigger: str | None = None
-    ) -> None:
-        """Add a sequence to this light."""
-        await self._task_queue.put(
-            _QueueEntry(action=CONF_ADD, notify_id=notify_id, sequence=sequence, log_trigger=log_trigger)
-        )
-
-    async def _remove_sequence(self, notify_id: str, log_trigger: str | None = None) -> None:
-        """Remove a sequence from this light."""
-        await self._task_queue.put(_QueueEntry(notify_id=notify_id, action=CONF_DELETE, log_trigger=log_trigger))
-
-    async def _reset_running_sequences(self) -> None:
-        """Immediately reset the running sequence list."""
-        while self._running_sequences:
-            seq_id, anim = self._running_sequences.popitem()
-            await anim.stop()
-        self._last_set_color = None
-        await self._wake_loop()
-
-    @callback
-    def _friendly_name(self, entity_id: str) -> str:
-        """Return the friendly name of an entity, falling back to its entity_id."""
-        state = self.hass.states.get(entity_id)
-        if state:
-            return state.attributes.get("friendly_name") or entity_id
-        return entity_id
-
-    def _log_display_state(
-        self,
-        top_sequences: list[_NotificationSequence],
-        log_trigger: str | None = None,
-    ) -> None:
-        """Log a notification event combined with what is currently displaying.
-
-        Only logs when log_trigger is provided; the trigger string describes
-        what caused the change (enabled, disabled, or peek expired).
-        """
-        if self._event_logger is None or log_trigger is None:
-            return
-
-        top_ids = frozenset(s.notify_id for s in top_sequences)
-
-        if STATE_OFF in top_ids or None in top_ids:
-            displaying = "Off"
-        elif STATE_ON in top_ids:
-            displaying = "Light On"
-        else:
-            # Any sequence with priority > MAXIMUM_PRIORITY is showing via a
-            # temporary peek boost rather than its natural priority.
-            is_peek = any(s.priority > MAXIMUM_PRIORITY for s in top_sequences)
-            names = ", ".join(
-                self._friendly_name(s.notify_id)
-                for s in top_sequences
-                if s.notify_id not in (None, STATE_OFF, STATE_ON)
-            )
-            if is_peek:
-                displaying = f"{names} (peeking)"
-            else:
-                displaying = f"{names} (pri {top_sequences[0].priority})"
-
-        self._event_logger.update_message(f"{log_trigger}, displaying {displaying}")
-
-    def _reset_expected_response_timeout(self):
+    def _reset_expected_response_timeout(self) -> None:
         self._response_expected_expire_time = (
             time.time() + EXPECTED_SERVICE_CALL_TIMEOUT
         )
-
-    async def _handle_notification_change(
-        self, event: Event[EventStateChangedData]
-    ) -> None:
-        """Handle a subscribed notification changing state."""
-        notify_id = event.data[CONF_ENTITY_ID]
-        if event.data.get("new_state") is None:
-            _LOGGER.warning(
-                "[%s] No new state for [%s], renamed or deleted?",
-                self._config_entry.title,
-                notify_id,
-            )
-            await self._remove_sequence(
-                notify_id, log_trigger=f"{notify_id} removed (renamed or deleted)"
-            )
-            return
-
-        is_on = event.data["new_state"].state == STATE_ON
-        # The friendly name is already in the event's new_state attributes;
-        # read it directly rather than doing a second hass.states.get lookup.
-        friendly = event.data["new_state"].attributes.get("friendly_name") or notify_id
-        if is_on:
-            if notify_id in self._active_sequences and event.data.get("old_state") is None:
-                return
-            sequence = self._create_sequence_from_attr(
-                event.data["new_state"].attributes, notify_id
-            )
-            log_trigger = f"{friendly} (pri {sequence.priority}) enabled"
-            await self._add_sequence(notify_id, sequence, log_trigger=log_trigger)
-        else:
-            existing_seq = self._active_sequences.get(notify_id)
-            if existing_seq is not None:
-                p = existing_seq.priority
-                natural = p - MAXIMUM_PRIORITY if p > MAXIMUM_PRIORITY else p
-                log_trigger = f"{friendly} (pri {natural}) disabled"
-                await self._remove_sequence(notify_id, log_trigger=log_trigger)
-
-    async def _handle_wrapped_light_change(
-        self, event: Event[EventStateChangedData]
-    ) -> None:
-        """Handle the underlying wrapped light changing state."""
-        if event.data["old_state"] is None:
-            await self._handle_wrapped_light_init()
-        elif time.time() > self._response_expected_expire_time:
-            _LOGGER.warning(
-                "%s received unexpected event %s", self.entity_id, str(event.data)
-            )
-            # Current state is unknown, just reset
-            await self._reset_running_sequences()
-
-    async def _handle_wrapped_light_init(self) -> None:
-        """Handle wrapped light entity initializing."""
-        entity_registry: er.EntityRegistry = er.async_get(self.hass)
-        entity: er.RegistryEntry | None = entity_registry.async_get(
-            self._wrapped_entity_id
-        )
-        if entity:
-            self._attr_capability_attributes = dict(entity.capabilities)
-            self._attr_supported_color_modes = self._attr_capability_attributes.get(
-                "supported_color_modes", set()
-            )
-            self._wrapped_init_done = True
-            self.async_write_ha_state()
-            await self._wake_loop()
 
     async def _wrapped_light_turn_on(self, **kwargs: Any) -> bool:
         """Turn on the underlying wrapped light entity."""
@@ -860,17 +417,11 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         if (
             ATTR_RGB_COLOR in kwargs
             and ATTR_BRIGHTNESS not in kwargs
-            and ColorMode.RGB
-            not in (
-                self._attr_supported_color_modes or {}
-            )  # wrapped bulb's real capabilities
+            and ColorMode.RGB not in (self._attr_supported_color_modes or {})
         ):
-            # We want low RGB values to be dim, but HomeAssistant needs a separate brightness value for that.
-            # TODO: Do we actually want this?
-            # If brightness was not passed in and bulb doesn't support RGB then convert to HS + Brightness.
+            # Convert RGB → HS + brightness when the bulb doesn't support RGB natively.
             rgb = kwargs.pop(ATTR_RGB_COLOR)
             h, s, v = color_RGB_to_hsv(*rgb)
-            # Re-scale 'v' from 0-100 to 0-255
             brightness = (255 / 100) * v
             kwargs[ATTR_HS_COLOR] = (h, s)
             kwargs[ATTR_BRIGHTNESS] = brightness
@@ -895,10 +446,82 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         )
         return True
 
+    # ------------------------------------------------------------------
+    # Notification event handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_notification_change(
+        self, event: Event[EventStateChangedData]
+    ) -> None:
+        """Handle a subscribed notification changing state."""
+        notify_id = event.data[CONF_ENTITY_ID]
+        if event.data.get("new_state") is None:
+            _LOGGER.warning(
+                "[%s] No new state for [%s], renamed or deleted?",
+                self._config_entry.title,
+                notify_id,
+            )
+            await self._remove_sequence(
+                notify_id, log_trigger=f"{notify_id} removed (renamed or deleted)"
+            )
+            return
+
+        is_on = event.data["new_state"].state == STATE_ON
+        friendly = event.data["new_state"].attributes.get("friendly_name") or notify_id
+        if is_on:
+            if (
+                notify_id in self._active_sequences
+                and event.data.get("old_state") is None
+            ):
+                return
+            notification = self._create_sequence_from_attr(
+                event.data["new_state"].attributes, notify_id
+            )
+            log_trigger = f"{friendly} (pri {notification.priority}) enabled"
+            await self._add_sequence(notify_id, notification, log_trigger=log_trigger)
+        else:
+            existing_seq = self._active_sequences.get(notify_id)
+            if existing_seq is not None:
+                p = existing_seq.priority
+                natural = p - MAXIMUM_PRIORITY if p > MAXIMUM_PRIORITY else p
+                log_trigger = f"{friendly} (pri {natural}) disabled"
+                await self._remove_sequence(notify_id, log_trigger=log_trigger)
+
+    async def _handle_wrapped_light_change(
+        self, event: Event[EventStateChangedData]
+    ) -> None:
+        """Handle the underlying wrapped light changing state."""
+        if event.data["old_state"] is None:
+            await self._handle_wrapped_light_init()
+        elif time.time() > self._response_expected_expire_time:
+            _LOGGER.warning(
+                "%s received unexpected event %s", self.entity_id, str(event.data)
+            )
+            await self._manager._reset_running_sequences()  # noqa: SLF001
+
+    async def _handle_wrapped_light_init(self) -> None:
+        """Handle wrapped light entity initializing."""
+        entity_registry: er.EntityRegistry = er.async_get(self.hass)
+        entity: er.RegistryEntry | None = entity_registry.async_get(
+            self._wrapped_entity_id
+        )
+        if entity:
+            self._attr_capability_attributes = dict(entity.capabilities)
+            self._attr_supported_color_modes = self._attr_capability_attributes.get(
+                "supported_color_modes", set()
+            )
+            self._wrapped_init_done = True
+            self.async_write_ha_state()
+            await self._manager._wake_loop()  # noqa: SLF001
+
+    # ------------------------------------------------------------------
+    # Sequence factory
+    # ------------------------------------------------------------------
+
     def _create_sequence_from_attr(
         self, attributes: dict[str, Any], notify_id: str | None = None
-    ) -> _NotificationSequence:
-        """Create a light NotifySequence from a notification attributes."""
+    ) -> ActiveNotification:
+        """Create an ActiveNotification from notification entity attributes."""
         pattern = attributes.get(CONF_NOTIFY_PATTERN)
         if not pattern:
             pattern = [ColorInfo(rgb=attributes.get(CONF_RGB_SELECTOR, WARM_WHITE_RGB))]
@@ -908,13 +531,19 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             float(timedelta(**expire_time).seconds) if expire_time else None
         )
         priority = attributes.get(CONF_PRIORITY, DEFAULT_PRIORITY)
-        return _NotificationSequence(
-            pattern=pattern,
-            priority=priority,
-            notify_id=notify_id,
-            clear_delay=delay_sec,
-            peek_enabled=attributes.get(CONF_PEEK_ENABLED, True),
+        return ActiveNotification(
+            NotificationConfig(
+                pattern=pattern,
+                priority=priority,
+                notify_id=notify_id,
+                clear_delay=delay_sec,
+                peek_enabled=attributes.get(CONF_PEEK_ENABLED, True),
+            )
         )
+
+    # ------------------------------------------------------------------
+    # HA service handlers
+    # ------------------------------------------------------------------
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Handle a turn_on service call."""
@@ -935,17 +564,20 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
 
         priority = self._light_on_priority
         if self._dynamic_priority:
-            # Dynamic priority gets 0.5 boost of top priority to ensure light-on always shows.
             priority = max(priority, self._get_top_sequences()[0].priority) + 0.5
 
         self._last_on_rgb = rgb
-        sequence = _NotificationSequence(
-            pattern=[ColorInfo(rgb=rgb)],
-            priority=priority,
-            notify_id=STATE_ON,
+        notification = ActiveNotification(
+            NotificationConfig(
+                pattern=[ColorInfo(rgb=rgb)],
+                priority=priority,
+                notify_id=STATE_ON,
+                peek_enabled=False,
+                clear_delay=None,
+            )
         )
 
-        await self._add_sequence(STATE_ON, sequence, log_trigger="Light turned on")
+        await self._add_sequence(STATE_ON, notification, log_trigger="Light turned on")
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
@@ -956,7 +588,6 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
 
     async def async_toggle(self, **kwargs: Any) -> None:
         """Handle a toggle service call."""
-        # Turn 'on' the light if it is off, or if dynamic priority is enabled and 'on' isn't top.
         if not self.is_on or (
             self._dynamic_priority
             and self._get_top_sequences()[0].notify_id != STATE_ON
@@ -969,10 +600,8 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         """Play a preview notification sequence on this light.
 
         Replaces any currently running preview. Auto-expires after
-        MAX_PREVIEW_DURATION_SEC as a safety cap (browser crash, abandoned
-        config flow, etc.). Call async_stop_preview to clear it sooner.
+        MAX_PREVIEW_DURATION_SEC as a safety cap.
         """
-        # Cancel any existing safety-cap timer before replacing the preview.
         if self._preview_cancel is not None:
             self._preview_cancel()
             self._preview_cancel = None
@@ -980,8 +609,8 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         await self._remove_sequence(PREVIEW_NOTIFY_ID)
         attrs = {**kwargs, CONF_EXPIRE_ENABLED: False}
         attrs.pop(CONF_DELAY_TIME, None)
-        sequence = self._create_sequence_from_attr(attrs, PREVIEW_NOTIFY_ID)
-        await self._add_sequence(PREVIEW_NOTIFY_ID, sequence)
+        notification = self._create_sequence_from_attr(attrs, PREVIEW_NOTIFY_ID)
+        await self._add_sequence(PREVIEW_NOTIFY_ID, notification)
 
         async def _expire_preview(_: Any) -> None:
             self._preview_cancel = None
@@ -998,9 +627,36 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             self._preview_cancel = None
         await self._remove_sequence(PREVIEW_NOTIFY_ID)
 
+    # ------------------------------------------------------------------
+    # HA entity properties
+    # ------------------------------------------------------------------
+
+    @callback
+    @staticmethod
+    def mix_colors(
+        colors: list[ColorInfo], weights: list[float] | None = None
+    ) -> ColorInfo:
+        """Mix a list of RGB colors with their respective brightness and weight values."""
+        if weights is None:
+            weights = [1.0] * len(colors)
+        total_weight = sum(weights)
+        normalized_weights = [w / total_weight for w in weights]
+        r_total, g_total, b_total, brightness_total = 0.0, 0.0, 0.0, 0.0
+        for color, weight in zip(colors, normalized_weights, strict=True):
+            r, g, b = color.rgb
+            r_total += r * weight
+            g_total += g * weight
+            b_total += b * weight
+            brightness_total += color.brightness * weight
+        r = min(int(round(r_total)), 255)
+        g = min(int(round(g_total)), 255)
+        b = min(int(round(b_total)), 255)
+        brightness_total = min(int(round(brightness_total)), 255)
+        return ColorInfo((r, g, b), brightness_total)
+
     @property
     def capability_attributes(self) -> dict[str, Any] | None:
-        """Return the capability attributes of the underlying light entity."""
+        """Return capability attributes."""
         return self._attr_capability_attributes
 
     @property
@@ -1011,14 +667,12 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             data[ATTR_COLOR_MODE] = ColorMode.RGB
             data[ATTR_RGB_COLOR] = self._last_on_rgb
             h, s, v = color_RGB_to_hsv(*self._last_on_rgb)
-            brightness = (255 / 100) * v  # Re-scale 'v' from 0-100 to 0-255
+            brightness = (255 / 100) * v
             data[ATTR_BRIGHTNESS] = brightness
             x, y = color_hs_to_xy(h, s)
             data[ATTR_XY_COLOR] = (x, y)
             data[ATTR_COLOR_TEMP_KELVIN] = color_xy_to_temperature(x, y)
         else:
-            # Explicit None values required: HA skips merging state_attributes
-            # when the dict is falsy, leaving stale on-state values in the HA state.
             data[ATTR_COLOR_MODE] = None
             data[ATTR_BRIGHTNESS] = None
             data[ATTR_RGB_COLOR] = None
@@ -1028,7 +682,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
 
     @property
     def color_mode(self) -> ColorMode | str | None:
-        """Return the color mode of the light."""
+        """Return the current color mode."""
         return self._attr_color_mode
 
     @cached_property

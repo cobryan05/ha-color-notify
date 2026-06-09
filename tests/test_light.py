@@ -1,6 +1,7 @@
 """Tests for color_notify light entity behavior."""
 
 import asyncio
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,9 +16,13 @@ from custom_components.color_notify.light import (
     LIGHT_ON_SEQUENCE,
     NotificationLightEntity,
     WARM_WHITE_RGB,
-    _NotificationSequence,
 )
-from custom_components.color_notify.const import DEFAULT_PRIORITY
+from custom_components.color_notify.models import ActiveNotification, NotificationConfig
+from custom_components.color_notify.const import CONF_SUBSCRIPTION, DEFAULT_PRIORITY, TYPE_POOL
+from custom_components.color_notify.utils.notification_manager import (
+    _AddCommand,
+    _CycleSameCommand,
+)
 
 
 class FakeState:
@@ -109,10 +114,14 @@ class TestAsyncToggleDynamicPriority:
     async def test_toggle_off_when_state_on_is_top(self):
         """Toggle turns off when entity is on and STATE_ON is top priority."""
         entity, entry = make_entity(is_on=True)
-        entity._active_sequences["on"] = _NotificationSequence(
-            notify_id="on",
-            pattern=[ColorInfo(WARM_WHITE_RGB, 255)],
-            priority=DEFAULT_PRIORITY,
+        entity._active_sequences["on"] = ActiveNotification(
+            NotificationConfig(
+                notify_id="on",
+                pattern=[ColorInfo(WARM_WHITE_RGB, 255)],
+                priority=DEFAULT_PRIORITY,
+                peek_enabled=True,
+                clear_delay=None,
+            )
         )
         entity._sort_active_sequences()
 
@@ -125,10 +134,14 @@ class TestAsyncToggleDynamicPriority:
         """Toggle turns on when a notification outranks STATE_ON."""
         entity, entry = make_entity(is_on=True)
         entity._active_sequences["on"] = LIGHT_ON_SEQUENCE
-        entity._active_sequences["alert"] = _NotificationSequence(
-            notify_id="alert",
-            pattern=[ColorInfo((255, 0, 0), 255)],
-            priority=DEFAULT_PRIORITY + 100,
+        entity._active_sequences["alert"] = ActiveNotification(
+            NotificationConfig(
+                notify_id="alert",
+                pattern=[ColorInfo((255, 0, 0), 255)],
+                priority=DEFAULT_PRIORITY + 100,
+                peek_enabled=True,
+                clear_delay=None,
+            )
         )
         entity._sort_active_sequences()
 
@@ -140,10 +153,16 @@ class TestAsyncToggleDynamicPriority:
 
 class TestNotificationSequenceColor:
     def test_sequence_initial_color_matches_pattern(self) -> None:
-        """A _NotificationSequence constructed with a pattern uses that pattern's color."""
+        """An ActiveNotification constructed with a pattern uses that pattern's color."""
         red = ColorInfo(rgb=(255, 0, 0), brightness=255)
-        seq = _NotificationSequence(
-            pattern=[red], priority=DEFAULT_PRIORITY, notify_id="on"
+        seq = ActiveNotification(
+            NotificationConfig(
+                pattern=[red],
+                priority=DEFAULT_PRIORITY,
+                notify_id="on",
+                peek_enabled=True,
+                clear_delay=None,
+            )
         )
         assert seq.color.rgb == (255, 0, 0)
 
@@ -160,9 +179,9 @@ class TestTurnOnColorBrightness:
     async def test_turn_on_with_rgb_color_creates_sequence_with_that_color(self) -> None:
         """async_turn_on(rgb_color=X) queues a sequence whose color matches X."""
         entity, _entry = self._make_entity()
-        captured: list[_NotificationSequence] = []
+        captured: list[ActiveNotification] = []
 
-        async def capture_add(notify_id: str, sequence: _NotificationSequence, log_trigger: str | None = None) -> None:
+        async def capture_add(notify_id: str, sequence: ActiveNotification, log_trigger: str | None = None) -> None:
             captured.append(sequence)
 
         entity._add_sequence = capture_add
@@ -180,9 +199,9 @@ class TestTurnOnColorBrightness:
         """async_turn_on(brightness=128) queues a sequence with a ~50% dimmed color."""
         entity, _entry = self._make_entity()
         entity._last_on_rgb = (255, 0, 0)
-        captured: list[_NotificationSequence] = []
+        captured: list[ActiveNotification] = []
 
-        async def capture_add(notify_id: str, sequence: _NotificationSequence, log_trigger: str | None = None) -> None:
+        async def capture_add(notify_id: str, sequence: ActiveNotification, log_trigger: str | None = None) -> None:
             captured.append(sequence)
 
         entity._add_sequence = capture_add
@@ -244,15 +263,18 @@ class TestWarmupTimeDetection:
         entry.data["warmup_time"] = warmup_ms
         entity._active_sequences["off"] = LIGHT_OFF_SEQUENCE
         entity._wrapped_light_turn_on = AsyncMock(return_value=True)
-        entity._log_display_state = MagicMock()
         return entity, entry
 
-    def _add_alert_seq(self, entity: NotificationLightEntity) -> _NotificationSequence:
+    def _add_alert_seq(self, entity: NotificationLightEntity) -> ActiveNotification:
         """Insert a high-priority alert sequence with a mocked run() and return it."""
-        seq = _NotificationSequence(
-            notify_id="alert",
-            pattern=[ColorInfo((255, 0, 0), 255)],
-            priority=DEFAULT_PRIORITY,
+        seq = ActiveNotification(
+            NotificationConfig(
+                notify_id="alert",
+                pattern=[ColorInfo((255, 0, 0), 255)],
+                priority=DEFAULT_PRIORITY,
+                peek_enabled=True,
+                clear_delay=None,
+            )
         )
         seq.run = AsyncMock()
         entity._active_sequences["alert"] = seq
@@ -287,7 +309,6 @@ class TestWarmupTimeDetection:
         # warmup_time deliberately omitted from entry.data
         entity._active_sequences["off"] = LIGHT_OFF_SEQUENCE
         entity._wrapped_light_turn_on = AsyncMock(return_value=True)
-        entity._log_display_state = MagicMock()
         entity.hass.states.get.return_value = FakeState("off")
         seq = self._add_alert_seq(entity)
 
@@ -326,12 +347,16 @@ class TestWarmupWorkerBehavior:
     be interrupted immediately when the sequence is stopped mid-warmup.
     """
 
-    def _make_seq_with_hold(self, hold_sec: float) -> _NotificationSequence:
+    def _make_seq_with_hold(self, hold_sec: float) -> ActiveNotification:
         """Return a sequence with _initial_hold_sec pre-set via set_initial_hold()."""
-        seq = _NotificationSequence(
-            notify_id="alert",
-            pattern=[ColorInfo((255, 0, 0), 255)],
-            priority=DEFAULT_PRIORITY,
+        seq = ActiveNotification(
+            NotificationConfig(
+                notify_id="alert",
+                pattern=[ColorInfo((255, 0, 0), 255)],
+                priority=DEFAULT_PRIORITY,
+                peek_enabled=True,
+                clear_delay=None,
+            )
         )
         seq.set_initial_hold(hold_sec)
         return seq
@@ -348,7 +373,7 @@ class TestWarmupWorkerBehavior:
         seq = self._make_seq_with_hold(1.5)
         stop_event = asyncio.Event()
 
-        with patch("custom_components.color_notify.light.asyncio.wait_for", side_effect=fake_wait_for):
+        with patch("custom_components.color_notify.models.asyncio.wait_for", side_effect=fake_wait_for):
             await seq._worker_func(stop_event)
 
         assert 1.5 in wait_for_timeouts, f"Expected hold timeout of 1.5 s; got: {wait_for_timeouts}"
@@ -364,7 +389,7 @@ class TestWarmupWorkerBehavior:
         seq = self._make_seq_with_hold(0.0)
         stop_event = asyncio.Event()
 
-        with patch("custom_components.color_notify.light.asyncio.wait_for", side_effect=fake_wait_for):
+        with patch("custom_components.color_notify.models.asyncio.wait_for", side_effect=fake_wait_for):
             await seq._worker_func(stop_event)
 
         assert wait_for_calls == [], f"Expected no wait_for calls; got: {wait_for_calls}"
@@ -381,7 +406,7 @@ class TestWarmupWorkerBehavior:
         stop_event = asyncio.Event()
         stop_event.set()  # already cancelled before worker starts
 
-        with patch("custom_components.color_notify.light.asyncio.wait_for", side_effect=fake_wait_for):
+        with patch("custom_components.color_notify.models.asyncio.wait_for", side_effect=fake_wait_for):
             await seq._worker_func(stop_event)
 
         assert wait_for_calls == [], "Hold wait_for should be skipped when stop_event is pre-set"
@@ -398,7 +423,301 @@ class TestWarmupWorkerBehavior:
         seq = self._make_seq_with_hold(10.0)
         stop_event = asyncio.Event()
 
-        with patch("custom_components.color_notify.light.asyncio.wait_for", side_effect=fake_wait_for):
+        with patch("custom_components.color_notify.models.asyncio.wait_for", side_effect=fake_wait_for):
             await seq._worker_func(stop_event)
 
         assert wait_for_completed_normally == [True], "Hold should return cleanly when stop_event fires mid-warmup"
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — _step_finished is always set when _worker_func exits
+# ---------------------------------------------------------------------------
+
+
+class TestStepFinishedOnException:
+    """_step_finished must be set (unblocked) when _worker_func exits for any reason.
+
+    Without the finally clause, an exception from runNextStep leaves _step_finished
+    cleared forever, which permanently blocks the work loop at asyncio.wait.
+    """
+
+    def _make_seq(self) -> ActiveNotification:
+        return ActiveNotification(
+            NotificationConfig(
+                notify_id="test",
+                pattern=[ColorInfo((255, 0, 0), 255)],
+                priority=DEFAULT_PRIORITY,
+                peek_enabled=True,
+                clear_delay=None,
+            )
+        )
+
+    async def test_step_finished_set_after_runNextStep_raises(self) -> None:
+        """_step_finished is set even when runNextStep raises, so the work loop is unblocked."""
+        seq = self._make_seq()
+        stop_event = asyncio.Event()
+        # Simulate the in-loop cleared state.
+        seq._step_finished.clear()
+        seq._sequence.runNextStep = AsyncMock(side_effect=RuntimeError("boom"))
+
+        await seq._worker_func(stop_event)
+
+        assert seq._step_finished.is_set(), (
+            "_step_finished must be set after exception; otherwise the work loop "
+            "waits on _step_finished.wait() forever"
+        )
+
+    async def test_step_finished_set_on_normal_completion(self) -> None:
+        """_step_finished is set when the worker finishes normally (done=True)."""
+        seq = self._make_seq()
+        stop_event = asyncio.Event()
+        seq._sequence.runNextStep = AsyncMock(return_value=True)  # done → exit loop
+
+        await seq._worker_func(stop_event)
+
+        assert seq._step_finished.is_set()
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — _CycleSameCommand rotates the top entry rather than dropping it
+# ---------------------------------------------------------------------------
+
+
+class TestCycleSameCommandRotation:
+    """_CycleSameCommand must rotate the top entry to the back, never drop it.
+
+    The original code only inserted top_seq when a lower-priority peer was found
+    (`if top_prio > it_seq.priority`).  When all priorities are equal that
+    condition is never true, so the top entry was silently removed on every cycle.
+    """
+
+    def _make_notif(self, notify_id: str, priority: int = DEFAULT_PRIORITY) -> ActiveNotification:
+        return ActiveNotification(
+            NotificationConfig(
+                notify_id=notify_id,
+                pattern=[ColorInfo((255, 0, 0), 255)],
+                priority=priority,
+                peek_enabled=True,
+                clear_delay=None,
+            )
+        )
+
+    async def _run_one_cycle(self, entity: NotificationLightEntity) -> None:
+        """Inject one _CycleSameCommand and let the work loop process it."""
+        entity._manager._process_sequence_list = AsyncMock()
+        task = asyncio.create_task(entity._manager._work_loop())
+        # Allow the loop to start and reach asyncio.wait (empty queue).
+        for _ in range(5):
+            await asyncio.sleep(0)
+        entity._task_queue.put_nowait(_CycleSameCommand())
+        # Allow the loop to drain the command and complete one more iteration.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def test_two_equal_priority_both_survive_and_rotate(self) -> None:
+        """Two equal-priority notifications: both remain after cycle; top moves to back."""
+        entity, _ = make_entity()
+        entity._active_sequences["A"] = self._make_notif("A")
+        entity._active_sequences["B"] = self._make_notif("B")
+        entity._sort_active_sequences()
+
+        await self._run_one_cycle(entity)
+
+        keys = list(entity._active_sequences.keys())
+        assert set(keys) == {"A", "B"}, "Both notifications must survive the cycle"
+        assert keys[-1] == "A", "Original top (A) should move to the back"
+
+    async def test_three_equal_priority_all_survive_and_rotate(self) -> None:
+        """Three equal-priority notifications: all remain; top moves to back."""
+        entity, _ = make_entity()
+        for nid in ("A", "B", "C"):
+            entity._active_sequences[nid] = self._make_notif(nid)
+        entity._sort_active_sequences()
+
+        await self._run_one_cycle(entity)
+
+        keys = list(entity._active_sequences.keys())
+        assert set(keys) == {"A", "B", "C"}, "All three notifications must survive"
+        assert keys[-1] == "A", "Original top (A) should move to the back"
+
+    async def test_mixed_priority_top_inserted_before_lower_peer(self) -> None:
+        """Top is inserted just before the first lower-priority peer (existing behaviour)."""
+        entity, _ = make_entity()
+        entity._active_sequences["A"] = self._make_notif("A", 1000)
+        entity._active_sequences["B"] = self._make_notif("B", 1000)
+        entity._active_sequences["C"] = self._make_notif("C", 500)
+        entity._sort_active_sequences()  # order: A, B, C
+
+        await self._run_one_cycle(entity)
+
+        keys = list(entity._active_sequences.keys())
+        assert set(keys) == {"A", "B", "C"}, "All notifications must survive"
+        assert keys[0] == "B", "B (was second) should now be first"
+        assert keys.index("A") < keys.index("C"), "A must precede lower-priority C"
+
+
+# ---------------------------------------------------------------------------
+# Fix 3 — _AddCommand duplicate stops the stale running animation
+# ---------------------------------------------------------------------------
+
+
+class TestAddCommandDuplicateHandling:
+    """When a notify_id is added again while already running, stop the old animation.
+
+    Without the fix _running_sequences keeps pointing to the old ActiveNotification,
+    so _process_sequence_list never starts the new one (the key is already present).
+    """
+
+    def _make_notif(self, notify_id: str) -> ActiveNotification:
+        return ActiveNotification(
+            NotificationConfig(
+                notify_id=notify_id,
+                pattern=[ColorInfo((255, 0, 0), 255)],
+                priority=DEFAULT_PRIORITY,
+                peek_enabled=False,  # avoid peek-boost side effects
+                clear_delay=None,
+            )
+        )
+
+    async def _process_add_command(
+        self, entity: NotificationLightEntity, cmd: _AddCommand
+    ) -> None:
+        """Inject one _AddCommand and let the work loop handle it."""
+        entity._manager._process_sequence_list = AsyncMock()
+        task = asyncio.create_task(entity._manager._work_loop())
+        for _ in range(5):
+            await asyncio.sleep(0)
+        entity._task_queue.put_nowait(cmd)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def test_duplicate_add_stops_old_running_animation(self) -> None:
+        """Re-adding an active notify_id awaits stop() on the old running notification."""
+        entity, _ = make_entity()
+        old_notif = self._make_notif("alert")
+        old_notif.stop = AsyncMock()
+
+        entity._active_sequences["alert"] = old_notif
+        entity._manager._running_sequences["alert"] = old_notif
+
+        await self._process_add_command(
+            entity,
+            _AddCommand(notify_id="alert", notification=self._make_notif("alert")),
+        )
+
+        old_notif.stop.assert_awaited_once()
+
+    async def test_duplicate_add_removes_old_from_running_sequences(self) -> None:
+        """After re-adding, the old notification is gone from _running_sequences."""
+        entity, _ = make_entity()
+        old_notif = self._make_notif("alert")
+        old_notif.stop = AsyncMock()
+
+        entity._active_sequences["alert"] = old_notif
+        entity._manager._running_sequences["alert"] = old_notif
+
+        new_notif = self._make_notif("alert")
+        await self._process_add_command(
+            entity,
+            _AddCommand(notify_id="alert", notification=new_notif),
+        )
+
+        # The old object must no longer be in running sequences.
+        assert entity._manager._running_sequences.get("alert") is not old_notif
+
+
+# ---------------------------------------------------------------------------
+# Fix 5 — async_will_remove_from_hass uses the correct pool subscription key
+# ---------------------------------------------------------------------------
+
+
+class TestPoolCallbackCleanupOnRemoval:
+    """Pool callbacks must be removed using options[CONF_SUBSCRIPTION][TYPE_POOL].
+
+    The bug used options[TYPE_POOL] directly (always empty), so callbacks were
+    never cleaned up and fired on the removed entity after unload.
+    """
+
+    async def test_pool_callback_discarded_on_entity_removal(self) -> None:
+        """_handle_notification_change is removed from the pool callback set on unload."""
+        entity, entry = make_entity()
+        pool_id = "pool_entry_abc"
+        callback_set: set = {entity._handle_notification_change, lambda: None}
+
+        entry.options = {CONF_SUBSCRIPTION: {TYPE_POOL: [pool_id]}}
+
+        with patch(
+            "custom_components.color_notify.light.HassData.get_config_entry_runtime_data",
+            return_value={CONF_SUBSCRIPTION: callback_set},
+        ):
+            await entity.async_will_remove_from_hass()
+
+        assert entity._handle_notification_change not in callback_set, (
+            "_handle_notification_change must be discarded from the pool's callback set"
+        )
+
+    async def test_other_callbacks_not_affected_by_removal(self) -> None:
+        """Other pool callbacks are not touched when this entity unloads."""
+        entity, entry = make_entity()
+        pool_id = "pool_entry_def"
+        other_cb = MagicMock()
+        callback_set: set = {entity._handle_notification_change, other_cb}
+
+        entry.options = {CONF_SUBSCRIPTION: {TYPE_POOL: [pool_id]}}
+
+        with patch(
+            "custom_components.color_notify.light.HassData.get_config_entry_runtime_data",
+            return_value={CONF_SUBSCRIPTION: callback_set},
+        ):
+            await entity.async_will_remove_from_hass()
+
+        assert other_cb in callback_set, "Other callbacks must not be disturbed"
+
+
+# ---------------------------------------------------------------------------
+# Fix 6 — each entity gets its own ActiveNotification for the off sentinel
+# ---------------------------------------------------------------------------
+
+
+class TestOffSequencePerEntity:
+    """async_added_to_hass must create a fresh ActiveNotification per entity.
+
+    LIGHT_OFF_SEQUENCE is mutable (holds _task, _stop_event, _color, _step_finished).
+    Sharing it means entity B's run() sets the stop event that belongs to entity A,
+    silently cancelling entity A's off animation.
+    """
+
+    async def _added_entity(self) -> NotificationLightEntity:
+        """Return an entity that has completed async_added_to_hass."""
+        entity, _ = make_entity()
+        entity.async_get_last_state = AsyncMock(return_value=None)
+        await entity.async_added_to_hass()
+        return entity
+
+    async def test_two_entities_have_distinct_off_sequence_objects(self) -> None:
+        """Two independently-added entities must not share the same off-sequence."""
+        entity_a = await self._added_entity()
+        entity_b = await self._added_entity()
+
+        off_a = entity_a._active_sequences.get("off")
+        off_b = entity_b._active_sequences.get("off")
+
+        assert off_a is not None and off_b is not None
+        assert off_a is not off_b, (
+            "Each entity must own a distinct ActiveNotification for STATE_OFF; "
+            "sharing a mutable singleton causes run() on entity B to cancel entity A's animation"
+        )
+
+    async def test_off_sequence_is_not_the_module_level_singleton(self) -> None:
+        """The off-sequence added per-entity must not be LIGHT_OFF_SEQUENCE itself."""
+        entity = await self._added_entity()
+
+        assert entity._active_sequences.get("off") is not LIGHT_OFF_SEQUENCE, (
+            "Entity must not store the module-level LIGHT_OFF_SEQUENCE singleton in its queue"
+        )
