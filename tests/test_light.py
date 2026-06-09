@@ -402,3 +402,43 @@ class TestWarmupWorkerBehavior:
             await seq._worker_func(stop_event)
 
         assert wait_for_completed_normally == [True], "Hold should return cleanly when stop_event fires mid-warmup"
+
+
+class TestAutoClearOnCompletion:
+    """clear_delay=0 fires switch turn_off only when the animation completes naturally.
+
+    If the sequence is stopped externally (stop_event set) before done, no
+    turn_off service call must be issued — the switch did not get to play its
+    pattern so it should stay on until explicitly cleared.
+    """
+
+    def _make_seq(self, pattern: list, notify_id: str = "switch.test") -> _NotificationSequence:
+        seq = _NotificationSequence(
+            notify_id=notify_id,
+            pattern=pattern,
+            priority=DEFAULT_PRIORITY,
+            clear_delay=0,
+        )
+        # _hass is normally set inside run(); set it directly for _worker_func tests.
+        seq._hass = MagicMock()
+        seq._hass.services.async_call = AsyncMock()
+        return seq
+
+    async def test_autoclear_does_not_fire_when_stopped_before_completion(self) -> None:
+        """No turn_off call when stop_event is set before the animation finishes."""
+        seq = self._make_seq(pattern=[ColorInfo(rgb=(255, 0, 0))])
+        stop_event = asyncio.Event()
+        stop_event.set()  # externally stopped before the animation ran
+
+        await seq._worker_func(stop_event)
+
+        seq._hass.services.async_call.assert_not_called()
+
+    async def test_autoclear_fires_when_animation_completes_naturally(self) -> None:
+        """turn_off is called when the animation runs to completion with stop_event clear."""
+        seq = self._make_seq(pattern=[ColorInfo(rgb=(255, 0, 0))])
+        stop_event = asyncio.Event()  # never set
+
+        await seq._worker_func(stop_event)
+
+        seq._hass.services.async_call.assert_called_once()

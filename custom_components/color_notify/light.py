@@ -215,8 +215,10 @@ class _NotificationSequence:
                 self._step_finished.set()
         except Exception as e:
             _LOGGER.exception("Failed running NotificationAnimation")
-        # Autoclear after animation if delay is 0
-        if self._clear_delay == 0:
+        # Autoclear after animation if delay is 0, but only when the animation
+        # ran to completion — not when it was stopped externally (e.g. by a
+        # higher-priority notification taking over).
+        if self._clear_delay == 0 and done:
             await self._hass.services.async_call(
                 Platform.SWITCH,
                 SERVICE_TURN_OFF,
