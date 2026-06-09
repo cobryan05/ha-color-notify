@@ -39,6 +39,7 @@ from .const import (
     CONF_DYNAMIC_PRIORITY,
     CONF_ENABLE_EVENT_LOG,
     CONF_ENTRY,
+    CONF_WARMUP_TIME,
     CONF_EXPIRE_ENABLED,
     CONF_NOTIFY_PATTERN,
     CONF_NTFCTN_ENTRIES,
@@ -116,6 +117,7 @@ ADD_LIGHT_DEFAULTS = {
     CONF_DELAY_TIME: {"seconds": 5},
     CONF_PEEK_TIME: {"seconds": 5},
     CONF_ENABLE_EVENT_LOG: True,
+    CONF_WARMUP_TIME: 250,
 }
 ADD_LIGHT_SCHEMA = vol.Schema(
     {
@@ -146,6 +148,17 @@ ADD_LIGHT_SCHEMA = vol.Schema(
         vol.Required(
             CONF_ENABLE_EVENT_LOG, default=ADD_LIGHT_DEFAULTS[CONF_ENABLE_EVENT_LOG]
         ): cv.boolean,
+        vol.Optional(
+            CONF_WARMUP_TIME, default=ADD_LIGHT_DEFAULTS[CONF_WARMUP_TIME]
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                mode=selector.NumberSelectorMode.BOX,
+                min=0,
+                max=10000,
+                step=1,
+                unit_of_measurement="ms",
+            )
+        ),
     }
 )
 
@@ -778,50 +791,7 @@ class LightOptionsFlowHandler(HassDataOptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Launch the options flow."""
-        return self.async_show_menu(
-            step_id="light_init",
-            menu_options=["light_options", "subscriptions"],
-        )
-
-    async def async_step_light_options(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Show and save the configurable light settings."""
-        if user_input is not None:
-            return await self._async_trigger_conf_update(
-                data=self._config_entry.options
-                | {
-                    CONF_DYNAMIC_PRIORITY: user_input[CONF_DYNAMIC_PRIORITY],
-                    CONF_PRIORITY: user_input[CONF_PRIORITY],
-                }
-            )
-
-        current = self._config_entry
-        schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_DYNAMIC_PRIORITY,
-                    default=current.options.get(
-                        CONF_DYNAMIC_PRIORITY,
-                        current.data.get(CONF_DYNAMIC_PRIORITY, True),
-                    ),
-                ): cv.boolean,
-                vol.Optional(
-                    CONF_PRIORITY,
-                    default=current.options.get(
-                        CONF_PRIORITY,
-                        current.data.get(CONF_PRIORITY, DEFAULT_PRIORITY),
-                    ),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        mode=selector.NumberSelectorMode.BOX,
-                        min=1,
-                        max=MAXIMUM_PRIORITY,
-                    )
-                ),
-            }
-        )
-        return self.async_show_form(step_id="light_options", data_schema=schema)
+        return await self.async_step_subscriptions(user_input)
 
     async def async_step_subscriptions(
         self, user_input: dict[str, Any] | None = None

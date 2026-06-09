@@ -22,6 +22,7 @@ CONF_PEEK_TIME: Final = "peek_time"
 CONF_PEEK_ENABLED: Final = "peek_enabled"
 CONF_DYNAMIC_PRIORITY: Final = "dynamic_priority"
 CONF_ENABLE_EVENT_LOG: Final = "enable_event_log"
+CONF_WARMUP_TIME: Final = "warmup_time"
 CONF_EVENT_ENTITY: Final = "event_entity"
 CONF_LOADED_PLATFORMS: Final = "loaded_platforms"
 

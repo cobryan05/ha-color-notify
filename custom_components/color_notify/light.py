@@ -1,6 +1,7 @@
 """Light platform for ColorNotify integration."""
 
 import asyncio
+import contextlib
 import time
 from collections.abc import Callable, Coroutine
 from copy import copy
@@ -62,6 +63,7 @@ from .const import (
     CONF_PEEK_ENABLED,
     CONF_PEEK_TIME,
     CONF_PRIORITY,
+    CONF_WARMUP_TIME,
     MAX_PREVIEW_DURATION_SEC,
     PREVIEW_NOTIFY_ID,
     SERVICE_STOP_PREVIEW,
@@ -158,6 +160,7 @@ class _NotificationSequence:
         self._peek_enabled: bool = peek_enabled
         self._step_finished: asyncio.Event = asyncio.Event()
         self._step_finished.set()
+        self._initial_hold_sec: float = 0.0
         self.reset()  # Set initial color from pattern
 
     def __repr__(self) -> str:
@@ -187,6 +190,10 @@ class _NotificationSequence:
             else ColorInfo(OFF_RGB, 0)
         )
 
+    def set_initial_hold(self, seconds: float) -> None:
+        """Set extra hold time for the first color step (e.g. bulb warm-up)."""
+        self._initial_hold_sec = seconds
+
     async def _worker_func(self, stop_event: asyncio.Event):
         """Coroutine to run the animation until finished or interrupted."""
         # TODO: Is this extra task needed around sequence?
@@ -194,13 +201,18 @@ class _NotificationSequence:
 
         # Read in the pattern and init
         self.reset()
+        hold_delay = self._initial_hold_sec
         try:
             while not done and not stop_event.is_set():
                 self._step_finished.clear()
                 done = await self._sequence.runNextStep()
-                self._step_finished.set()
                 if not stop_event.is_set():  # Don't update if we were interrupted
                     self._color = self._sequence.color
+                if hold_delay > 0 and not stop_event.is_set():
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(stop_event.wait(), timeout=hold_delay)
+                    hold_delay = 0
+                self._step_finished.set()
         except Exception as e:
             _LOGGER.exception("Failed running NotificationAnimation")
         # Autoclear after animation if delay is 0
@@ -462,12 +474,17 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             # Log the notification event with the current display state.
             self._log_display_state(top_sequences, log_trigger)
 
+            wrapped_state = self.hass.states.get(self._wrapped_entity_id)
+            bulb_is_off = wrapped_state is None or wrapped_state.state != STATE_ON
+            warmup_ms: int = self._config_entry.data.get(CONF_WARMUP_TIME, 0) if bulb_is_off else 0
+
             # Ensure all top sequences are in the running list
             for sequence in top_sequences:
                 if (
                     sequence.notify_id is not None
                     and sequence.notify_id not in self._running_sequences
                 ):
+                    sequence.set_initial_hold(warmup_ms / 1000.0)
                     await sequence.run(self.hass, self._config_entry)
                     self._running_sequences[sequence.notify_id] = sequence
 

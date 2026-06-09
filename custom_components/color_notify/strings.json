@@ -38,7 +38,11 @@
           "peek_time": "Duration to temporarily display lower-priority notifications",
           "delay": "Auto-cycle between same priority notifications",
           "delay_time": "Auto-cycle delay",
-          "enable_event_log": "Enable event logging entity"
+          "enable_event_log": "Enable event logging entity",
+          "warmup_time": "Warmup time (ms)"
+        },
+        "data_description": {
+          "warmup_time": "Extra hold time for the initial color if the bulb was off when the notification started. Use this for bulbs that are slow to turn on."
         }
       },
       "reconfigure_light": {
@@ -52,7 +56,11 @@
           "peek_time": "Duration to temporarily display lower-priority notifications",
           "delay": "Auto-cycle between same priority notifications",
           "delay_time": "Auto-cycle delay",
-          "enable_event_log": "Enable event logging entity"
+          "enable_event_log": "Enable event logging entity",
+          "warmup_time": "Warmup time (ms)"
+        },
+        "data_description": {
+          "warmup_time": "Extra hold time for the initial color if the bulb was off when the notification started. Use this for bulbs that are slow to turn on."
         }
       }
     }
@@ -158,32 +166,11 @@
           "delete": "Select notifications to delete"
         }
       },
-      "light_init": {
-        "description": "Configure light",
-        "menu_options": {
-          "light_options": "Change light settings",
-          "subscriptions": "Modify subscriptions"
-        }
-      },
       "subscriptions": {
         "description": "Subscribe to entire pools and/or individual notifications\nUse 'Reconfigure' to update other bulb settings.",
         "data": {
           "pool": "Notification Pools",
           "entities": "Individual Notifications"
-        }
-      },
-      "light_options": {
-        "description": "Change light settings",
-        "data": {
-          "name": "Notification Light Name",
-          "entity_id": "Light Entity To Use",
-          "color_picker": "Default 'On' color of light",
-          "priority": "Minimum 'On' priority.",
-          "dynamic_priority": "Dynamic 'On' Priority (inherit active light priority + 0.5 when switched on)",
-          "enable_event_log": "Enable event logging entity",
-          "peek_time": "Duration to temporarily display lower-priority notifications",
-          "delay": "Auto-cycle between same priority notifications",
-          "delay_time": "Auto-cycle delay"
         }
       }
     }
