@@ -8,9 +8,10 @@ from copy import copy
 from dataclasses import dataclass, field, replace
 import json
 import logging
+import math
 from typing import Any
 
-from homeassistant.components.light import ATTR_RGB_COLOR
+from homeassistant.components.light import ATTR_RGB_COLOR, ATTR_TRANSITION
 from homeassistant.const import CONF_DELAY, CONF_RGB
 
 from ..const import OFF_RGB, WARM_WHITE_RGB
@@ -30,6 +31,7 @@ class ColorInfo:
 
     rgb: tuple = WARM_WHITE_RGB
     brightness: float = 100.0
+    transition: float | None = None
 
     def interpolated_to(self, end: ColorInfo, amount: float) -> ColorInfo:
         """Return a new ColorInfo that is 0-1.0 linearly interpolated between end."""
@@ -40,8 +42,12 @@ class ColorInfo:
     @property
     def light_params(self) -> dict[str, Any]:
         """Return dict suitable for passing to light.turn_on service."""
-        return {ATTR_RGB_COLOR: self.rgb}
+        params: dict[str, Any] = {ATTR_RGB_COLOR: self.rgb}
 
+        if self.transition is not None:
+            params[ATTR_TRANSITION] = self.transition
+
+        return params
 
 class LightSequence:
     """Handle cycling through sequences of colors."""
@@ -104,12 +110,28 @@ class LightSequence:
                         json_txt = f"{{{item.strip().strip('{}')}}}"  # Strip and re-add curly braces
                         item_dict = json.loads(json_txt)
                         rgb = item_dict.get(ATTR_RGB_COLOR, item_dict[CONF_RGB])
+
+                        raw_transition = item_dict.get(ATTR_TRANSITION)
+
+                        if raw_transition is None:
+                            transition = None
+                        elif (
+                            isinstance(raw_transition, bool)
+                            or not isinstance(raw_transition, (int, float))
+                            or not math.isfinite(raw_transition)
+                            or raw_transition < 0
+                        ):
+                            raise ValueError(
+                                "'transition' must be a finite, non-negative number"
+                            )
+                        else:
+                            transition = float(raw_transition)
+
                     except Exception as e:
                         raise Exception(f"Error in entry #{idx+1}: {str(e)}")
-                    color = ColorInfo(rgb=rgb)
+                    color = ColorInfo(rgb=rgb, transition=transition)
                     if initial_color is None:
                         initial_color = color
-                    # TODO: Fade
                     new_sequence._addStep(_StepSetColor(color))
                     if delay := item_dict.get(CONF_DELAY):
                         new_sequence._addStep(_StepDelay(delay))
