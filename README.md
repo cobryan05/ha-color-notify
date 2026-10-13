@@ -69,9 +69,10 @@ Notifications are organized into pools and customized with priorities, lifetimes
 * **Temporary Display on Activation:** Forces the notification to briefly take over the light upon activation, regardless of its priority ranking.
 * **Automatic Clear After Timeout:** Automatically turns off the notification switch after a set duration. A timeout value of `0` will automatically clear the switch immediately after the animation pattern completes its run.
 * **Color:** Applies a static, solid RGB color to the notification.
-* **Pattern:** Build complex animations using a sequence of JSON steps containing colors and delays:
-  * **Loops:** Use `[` to open a loop and `], loopcnt` to close and define its repetitions (e.g., `], 5` runs that segment five times).
+* **Pattern:** Build complex animations using a sequence of JSON steps containing colors, delays, and optional transitions:
+  * **Loops:** Use `[` to open a loop and `], loopcnt` to close and define its repetitions (e.g., `], 5` runs that segment five times). No value for infinite loop (e.g, `[...]`).
   * **Steps:** Format individual color blocks with RGB values and duration in seconds (e.g., `{"rgb": [255,0,0], "delay": 0.5}` flashes red for half a second).
+  * **Transitions:** Add an optional `"transition"` value in seconds to smoothly fade into that step's color (e.g., `{"rgb": [0,0,255], "delay": 1, "transition": 0.5}`). If omitted, the color changes as before.
 * **Preview Options:** Immediately test your changes straight from the config flow
   * Preview your notification immediately on any registered light
 ---
