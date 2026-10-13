@@ -302,7 +302,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         self._running_sequences: dict[str, _NotificationSequence] = {}
         self._active_sequences: dict[str, _NotificationSequence] = {}
         self._last_set_color: ColorInfo | None = None
-        self._dynamic_priority: bool = self._config_entry.options.get(
+        self._dynamic_priority: bool = self._config_entry.data.get(
             CONF_DYNAMIC_PRIORITY, True
         )
         self._response_expected_expire_time: float = 0.0
@@ -311,7 +311,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         self._task: asyncio.Task | None = None
         self._preview_cancel: Callable | None = None
 
-        self._light_on_priority: int = config_entry.options.get(
+        self._light_on_priority: int = config_entry.data.get(
             CONF_PRIORITY, DEFAULT_PRIORITY
         )
         self._last_on_rgb: tuple = tuple(
@@ -619,7 +619,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
                     if (
                         peek_duration > 0
                         and item.sequence.peek_enabled
-                        and item.notify_id != STATE_OFF
+                        and item.notify_id not in (STATE_OFF, STATE_ON)
                         and item.sequence.priority <= current_top_priority
                     ):
                         auto_clears = (
@@ -939,6 +939,19 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         if self._dynamic_priority:
             # Dynamic priority gets 0.5 boost of top priority to ensure light-on always shows.
             priority = max(priority, self._get_top_sequences()[0].priority) + 0.5
+
+        top_sequences = self._get_top_sequences()
+        top_priority = top_sequences[0].priority if top_sequences else None
+
+        _LOGGER.debug(
+            "%s: dynamic_priority=%s, configured_priority=%s, "
+            "top_priority=%s, effective_priority=%s",
+            self.entity_id,
+            self._dynamic_priority,
+            self._light_on_priority,
+            top_priority,
+            priority,
+        )
 
         self._last_on_rgb = rgb
         sequence = _NotificationSequence(
