@@ -19,6 +19,7 @@ from homeassistant.components.light import (
     ATTR_COLOR_TEMP_KELVIN,
     ATTR_HS_COLOR,
     ATTR_RGB_COLOR,
+    ATTR_TRANSITION,
     ATTR_XY_COLOR,
     ColorMode,
     LightEntity,
@@ -781,10 +782,13 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
 
         self._event_logger.update_message(f"{log_trigger}, displaying {displaying}")
 
-    def _reset_expected_response_timeout(self):
-        self._response_expected_expire_time = (
-            time.time() + EXPECTED_SERVICE_CALL_TIMEOUT
-        )
+        def _reset_expected_response_timeout(
+            self, extra_sec: float = 0.0
+        ) -> None:
+            """Reset the expected response timeout, including transition duration."""
+            self._response_expected_expire_time = (
+                time.time() + EXPECTED_SERVICE_CALL_TIMEOUT + extra_sec
+            )
 
     async def _handle_notification_change(
         self, event: Event[EventStateChangedData]
@@ -892,7 +896,9 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             kwargs[ATTR_HS_COLOR] = (h, s)
             kwargs[ATTR_BRIGHTNESS] = brightness
 
-        self._reset_expected_response_timeout()
+        self._reset_expected_response_timeout(
+            extra_sec=kwargs.get(ATTR_TRANSITION) or 0
+        )
         await self.hass.services.async_call(
             Platform.LIGHT,
             SERVICE_TURN_ON,
