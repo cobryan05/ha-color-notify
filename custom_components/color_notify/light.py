@@ -834,6 +834,9 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             STATE_UNKNOWN,
             STATE_UNAVAILABLE,
         ):
+            # Force the current display color to be reapplied when the
+            # underlying light becomes available again.
+            self._last_set_color = None
             await self._handle_wrapped_light_init()
             return
 
