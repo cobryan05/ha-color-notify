@@ -782,13 +782,13 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
 
         self._event_logger.update_message(f"{log_trigger}, displaying {displaying}")
 
-        def _reset_expected_response_timeout(
-            self, extra_sec: float = 0.0
-        ) -> None:
-            """Reset the expected response timeout, including transition duration."""
-            self._response_expected_expire_time = (
-                time.time() + EXPECTED_SERVICE_CALL_TIMEOUT + extra_sec
-            )
+    def _reset_expected_response_timeout(
+        self, extra_sec: float = 0.0
+    ) -> None:
+        """Reset the expected response timeout, including transition duration."""
+        self._response_expected_expire_time = (
+            time.time() + EXPECTED_SERVICE_CALL_TIMEOUT + extra_sec
+        )
 
     async def _handle_notification_change(
         self, event: Event[EventStateChangedData]
