@@ -34,6 +34,8 @@ from homeassistant.const import (
     SERVICE_TURN_ON,
     STATE_OFF,
     STATE_ON,
+    STATE_UNKNOWN,
+    STATE_UNAVAILABLE,
     Platform,
 )
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
@@ -824,13 +826,23 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         self, event: Event[EventStateChangedData]
     ) -> None:
         """Handle the underlying wrapped light changing state."""
-        if event.data["old_state"] is None:
+        old_state = event.data["old_state"]
+
+        # The entity is new, or is becoming available again.
+        # Treat this as initialization rather than an unexpected change.
+        if old_state is None or old_state.state in (
+            STATE_UNKNOWN,
+            STATE_UNAVAILABLE,
+        ):
             await self._handle_wrapped_light_init()
-        elif time.time() > self._response_expected_expire_time:
+            return
+
+        if time.time() > self._response_expected_expire_time:
             _LOGGER.warning(
-                "%s received unexpected event %s", self.entity_id, str(event.data)
+                "%s received unexpected event %s",
+                self.entity_id,
+                str(event.data),
             )
-            # Current state is unknown, just reset
             await self._reset_running_sequences()
 
     async def _handle_wrapped_light_init(self) -> None:
