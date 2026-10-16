@@ -49,6 +49,7 @@ class ColorInfo:
 
         return params
 
+
 class LightSequence:
     """Handle cycling through sequences of colors."""
 
@@ -91,6 +92,7 @@ class LightSequence:
                     loop_stack.append(next_loop_id)
                     next_loop_id += 1
                 elif item.startswith("]"):
+                    # ']' loops forever; '], N' repeats the loop body N more times.
                     with_iter_cnt = item.split(",")
                     if len(with_iter_cnt) == 2:
                         iter_cnt = int(with_iter_cnt[1])
@@ -98,7 +100,6 @@ class LightSequence:
                         iter_cnt = -1
                         new_sequence._loops_forever = True
 
-                    iter_cnt = int(with_iter_cnt[1]) if len(with_iter_cnt) == 2 else -1
                     if len(loop_stack) == 0:
                         raise Exception(
                             f"Loop close in entry #{idx+1} with no open loop!"
@@ -109,7 +110,13 @@ class LightSequence:
                     try:
                         json_txt = f"{{{item.strip().strip('{}')}}}"  # Strip and re-add curly braces
                         item_dict = json.loads(json_txt)
-                        rgb = item_dict.get(ATTR_RGB_COLOR, item_dict[CONF_RGB])
+                        # Accept either 'rgb_color' or 'rgb'. Only fall back to 'rgb'
+                        # when 'rgb_color' is absent, so 'rgb' isn't required.
+                        rgb = (
+                            item_dict[ATTR_RGB_COLOR]
+                            if ATTR_RGB_COLOR in item_dict
+                            else item_dict[CONF_RGB]
+                        )
 
                         raw_transition = item_dict.get(ATTR_TRANSITION)
 

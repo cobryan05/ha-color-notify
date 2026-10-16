@@ -870,7 +870,13 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
     async def _wrapped_light_turn_on(self, **kwargs: Any) -> bool:
         """Turn on the underlying wrapped light entity."""
         if kwargs.get(ATTR_RGB_COLOR, []) == OFF_RGB:
-            return await self._wrapped_light_turn_off()
+            # Keep any transition so a step to black fades out instead of snapping off.
+            off_kwargs = (
+                {ATTR_TRANSITION: kwargs[ATTR_TRANSITION]}
+                if ATTR_TRANSITION in kwargs
+                else {}
+            )
+            return await self._wrapped_light_turn_off(**off_kwargs)
 
         if not self._wrapped_init_done:
             _LOGGER.warning(
@@ -910,7 +916,9 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         """Turn off the underlying wrapped light entity."""
         if not self._wrapped_init_done:
             return False
-        self._reset_expected_response_timeout()
+        self._reset_expected_response_timeout(
+            extra_sec=kwargs.get(ATTR_TRANSITION) or 0
+        )
         await self.hass.services.async_call(
             Platform.LIGHT,
             SERVICE_TURN_OFF,

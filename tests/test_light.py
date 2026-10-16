@@ -11,13 +11,18 @@ from custom_components.color_notify.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_MODE,
     ColorInfo,
+    ColorMode,
     LIGHT_OFF_SEQUENCE,
     LIGHT_ON_SEQUENCE,
     NotificationLightEntity,
     WARM_WHITE_RGB,
     _NotificationSequence,
 )
-from custom_components.color_notify.const import DEFAULT_PRIORITY
+from custom_components.color_notify.const import (
+    DEFAULT_PRIORITY,
+    EXPECTED_SERVICE_CALL_TIMEOUT,
+    OFF_RGB,
+)
 
 
 class FakeState:
@@ -442,3 +447,77 @@ class TestAutoClearOnCompletion:
         await seq._worker_func(stop_event)
 
         seq._hass.services.async_call.assert_called_once()
+
+
+class TestWrappedLightTransitions:
+    def _make_entity(self) -> NotificationLightEntity:
+        entity, _entry = make_entity()
+        entity._wrapped_init_done = True
+        entity._attr_supported_color_modes = {ColorMode.RGB}
+        entity.hass.services.async_call = AsyncMock()
+        return entity
+
+    async def test_step_to_black_fades_off_with_transition(self) -> None:
+        """A black step with a transition turns the bulb off using that transition."""
+        entity = self._make_entity()
+
+        await entity._wrapped_light_turn_on(rgb_color=OFF_RGB, transition=2.0)
+
+        _platform, service = entity.hass.services.async_call.await_args.args
+        service_data = entity.hass.services.async_call.await_args.kwargs["service_data"]
+        assert service == "turn_off"
+        assert service_data == {"entity_id": "light.test", "transition": 2.0}
+
+    async def test_step_to_black_without_transition_turns_off_plainly(self) -> None:
+        entity = self._make_entity()
+
+        await entity._wrapped_light_turn_on(rgb_color=OFF_RGB)
+
+        service_data = entity.hass.services.async_call.await_args.kwargs["service_data"]
+        assert service_data == {"entity_id": "light.test"}
+
+    @pytest.mark.parametrize("rgb", [(255, 0, 0), OFF_RGB])
+    async def test_transition_extends_expected_response_window(self, rgb: tuple) -> None:
+        """State updates during a fade aren't treated as unexpected outside changes."""
+        entity = self._make_entity()
+
+        with patch("time.time", return_value=1000.0):
+            await entity._wrapped_light_turn_on(rgb_color=rgb, transition=3.0)
+
+        assert entity._response_expected_expire_time == 1000.0 + EXPECTED_SERVICE_CALL_TIMEOUT + 3.0
+
+
+class TestWrappedLightAvailability:
+    def _make_entity(self) -> NotificationLightEntity:
+        entity, _entry = make_entity()
+        entity._handle_wrapped_light_init = AsyncMock()
+        entity._reset_running_sequences = AsyncMock()
+        entity._last_set_color = ColorInfo((255, 0, 0))
+        return entity
+
+    @staticmethod
+    def _event(old_state: FakeState | None) -> MagicMock:
+        event = MagicMock()
+        event.data = {"old_state": old_state, "new_state": FakeState("on")}
+        return event
+
+    @pytest.mark.parametrize("old_state", [None, FakeState("unavailable"), FakeState("unknown")])
+    async def test_becoming_available_reapplies_current_color(self, old_state) -> None:
+        """Returning from unavailable re-initializes and forces the color to be resent."""
+        entity = self._make_entity()
+
+        await entity._handle_wrapped_light_change(self._event(old_state))
+
+        entity._handle_wrapped_light_init.assert_awaited_once()
+        entity._reset_running_sequences.assert_not_awaited()
+        assert entity._last_set_color is None
+
+    async def test_unexpected_change_still_resets_sequences(self) -> None:
+        entity = self._make_entity()
+        entity._response_expected_expire_time = 0.0
+
+        await entity._handle_wrapped_light_change(self._event(FakeState("on")))
+
+        entity._reset_running_sequences.assert_awaited_once()
+        entity._handle_wrapped_light_init.assert_not_awaited()
+
