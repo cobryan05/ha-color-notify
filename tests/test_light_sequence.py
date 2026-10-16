@@ -2,6 +2,7 @@
 
 import pytest
 
+from custom_components.color_notify.const import OFF_RGB
 from custom_components.color_notify.utils.light_sequence import (
     ColorInfo,
     LightSequence,
@@ -32,7 +33,7 @@ class TestTransitionParsing:
         )
         [color] = _set_color_steps(seq)
         assert color.transition == 0.5
-        assert color.light_params == {"rgb_color": [255, 0, 0], "transition": 0.5}
+        assert color.light_params == {"rgb_color": (255, 0, 0), "transition": 0.5}
 
     def test_integer_transition_is_stored_as_float(self) -> None:
         seq = LightSequence.create_from_pattern(['{"rgb": [255, 0, 0], "transition": 2}'])
@@ -45,7 +46,7 @@ class TestTransitionParsing:
         seq = LightSequence.create_from_pattern(['{"rgb": [0, 0, 255], "delay": 1}'])
         [color] = _set_color_steps(seq)
         assert color.transition is None
-        assert color.light_params == {"rgb_color": [0, 0, 255]}
+        assert color.light_params == {"rgb_color": (0, 0, 255)}
 
     @pytest.mark.parametrize("bad_value", ['"slow"', "true", "-1", "[1]"])
     def test_invalid_transition_is_rejected(self, bad_value: str) -> None:
@@ -60,18 +61,26 @@ class TestRgbKeys:
         """'rgb_color' works without also supplying 'rgb'."""
         seq = LightSequence.create_from_pattern(['{"rgb_color": [1, 2, 3]}'])
         [color] = _set_color_steps(seq)
-        assert color.rgb == [1, 2, 3]
+        assert color.rgb == (1, 2, 3)
 
     def test_rgb_color_takes_precedence_over_rgb(self) -> None:
         seq = LightSequence.create_from_pattern(
             ['{"rgb_color": [1, 2, 3], "rgb": [4, 5, 6]}']
         )
         [color] = _set_color_steps(seq)
-        assert color.rgb == [1, 2, 3]
+        assert color.rgb == (1, 2, 3)
 
     def test_missing_color_is_rejected(self) -> None:
-        with pytest.raises(Exception, match="Error in entry #1"):
+        with pytest.raises(
+            Exception, match="Error in entry #1: missing color: provide 'rgb_color' or 'rgb'"
+        ):
             LightSequence.create_from_pattern(['{"delay": 1}'])
+
+    def test_json_rgb_is_stored_as_tuple(self) -> None:
+        """JSON lists become tuples so a black step compares equal to OFF_RGB."""
+        seq = LightSequence.create_from_pattern(['{"rgb": [0, 0, 0], "transition": 2}'])
+        [color] = _set_color_steps(seq)
+        assert color.rgb == OFF_RGB
 
 
 class TestLoopCounts:
@@ -87,3 +96,8 @@ class TestLoopCounts:
     def test_bare_close_loops_forever(self) -> None:
         seq = LightSequence.create_from_pattern(["[", '{"rgb": [255, 0, 0]}', "]"])
         assert seq.loops_forever
+
+    @pytest.mark.parametrize("close", ["], -1", "], 2, 3", "], abc", "],", "] 2", "]x"])
+    def test_malformed_loop_count_is_rejected(self, close: str) -> None:
+        with pytest.raises(Exception, match="Error in entry #3: loop count must be"):
+            LightSequence.create_from_pattern(["[", '{"rgb": [255, 0, 0]}', close])

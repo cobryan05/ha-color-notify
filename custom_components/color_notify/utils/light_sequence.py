@@ -93,12 +93,18 @@ class LightSequence:
                     next_loop_id += 1
                 elif item.startswith("]"):
                     # ']' loops forever; '], N' repeats the loop body N more times.
-                    with_iter_cnt = item.split(",")
-                    if len(with_iter_cnt) == 2:
-                        iter_cnt = int(with_iter_cnt[1])
-                    else:
+                    rest = item[1:].strip()
+                    if not rest:
                         iter_cnt = -1
                         new_sequence._loops_forever = True
+                    else:
+                        count_txt = rest.removeprefix(",").strip()
+                        if not rest.startswith(",") or not count_txt.isdecimal():
+                            raise Exception(
+                                f"Error in entry #{idx+1}: loop count must be a"
+                                f" non-negative integer (e.g. '], 2'), got '{item}'"
+                            )
+                        iter_cnt = int(count_txt)
 
                     if len(loop_stack) == 0:
                         raise Exception(
@@ -112,11 +118,17 @@ class LightSequence:
                         item_dict = json.loads(json_txt)
                         # Accept either 'rgb_color' or 'rgb'. Only fall back to 'rgb'
                         # when 'rgb_color' is absent, so 'rgb' isn't required.
-                        rgb = (
-                            item_dict[ATTR_RGB_COLOR]
-                            if ATTR_RGB_COLOR in item_dict
-                            else item_dict[CONF_RGB]
-                        )
+                        if ATTR_RGB_COLOR in item_dict:
+                            rgb = item_dict[ATTR_RGB_COLOR]
+                        elif CONF_RGB in item_dict:
+                            rgb = item_dict[CONF_RGB]
+                        else:
+                            raise ValueError(
+                                f"missing color: provide '{ATTR_RGB_COLOR}' or '{CONF_RGB}'"
+                            )
+                        # JSON yields lists; store a tuple so it compares equal to
+                        # tuple constants such as OFF_RGB.
+                        rgb = tuple(rgb)
 
                         raw_transition = item_dict.get(ATTR_TRANSITION)
 

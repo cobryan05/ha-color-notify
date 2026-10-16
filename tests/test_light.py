@@ -21,6 +21,7 @@ from custom_components.color_notify.light import (
 from custom_components.color_notify.const import (
     DEFAULT_PRIORITY,
     EXPECTED_SERVICE_CALL_TIMEOUT,
+    MAXIMUM_PRIORITY,
     OFF_RGB,
 )
 
@@ -476,6 +477,24 @@ class TestWrappedLightTransitions:
         service_data = entity.hass.services.async_call.await_args.kwargs["service_data"]
         assert service_data == {"entity_id": "light.test"}
 
+    async def test_json_pattern_black_step_fades_off(self) -> None:
+        """A black step parsed from a JSON pattern takes the fade-off path."""
+        entity = self._make_entity()
+        seq = _NotificationSequence(pattern=['{"rgb": [0, 0, 0], "transition": 2}'])
+
+        await entity._wrapped_light_turn_on(**seq.color.light_params)
+
+        _platform, service = entity.hass.services.async_call.await_args.args
+        assert service == "turn_off"
+
+    async def test_list_black_rgb_turns_off(self) -> None:
+        entity = self._make_entity()
+
+        await entity._wrapped_light_turn_on(rgb_color=[0, 0, 0], transition=1.0)
+
+        _platform, service = entity.hass.services.async_call.await_args.args
+        assert service == "turn_off"
+
     @pytest.mark.parametrize("rgb", [(255, 0, 0), OFF_RGB])
     async def test_transition_extends_expected_response_window(self, rgb: tuple) -> None:
         """State updates during a fade aren't treated as unexpected outside changes."""
@@ -568,3 +587,43 @@ class TestTurnOnDynamicPriority:
         await entity.async_turn_on()
 
         assert captured[0].priority == 10
+
+    async def test_turn_on_ignores_peek_boost(self) -> None:
+        """A notification peeking at natural + MAXIMUM_PRIORITY doesn't inflate light-on."""
+        entity, captured = self._make_entity()
+        entity._active_sequences["alert"] = _NotificationSequence(
+            notify_id="alert",
+            pattern=[ColorInfo((255, 0, 0), 255)],
+            priority=DEFAULT_PRIORITY + 100 + MAXIMUM_PRIORITY,
+        )
+        entity._sort_active_sequences()
+
+        await entity.async_turn_on()
+
+        assert captured[0].priority == DEFAULT_PRIORITY + 100.5
+
+    async def test_worker_recomputes_priority_after_queued_adds(self) -> None:
+        """A notification queued just before turn_on is counted once the worker runs."""
+        entity, _entry = make_entity()
+        del entity.async_turn_on
+        entity._active_sequences["off"] = LIGHT_OFF_SEQUENCE
+        entity._process_sequence_list = AsyncMock()
+
+        alert = _NotificationSequence(
+            notify_id="alert",
+            pattern=[ColorInfo((255, 0, 0), 255)],
+            priority=DEFAULT_PRIORITY + 100,
+            peek_enabled=False,
+        )
+        # Both are queued before the worker processes either one.
+        await entity._add_sequence("alert", alert)
+        await entity.async_turn_on()
+
+        worker = asyncio.create_task(entity._work_loop())
+        try:
+            await asyncio.wait_for(entity._task_queue.join(), timeout=1)
+        finally:
+            worker.cancel()
+
+        assert next(iter(entity._active_sequences)) == "on"
+        assert entity._active_sequences["on"].priority == DEFAULT_PRIORITY + 100.5
