@@ -76,6 +76,19 @@ class TestRgbKeys:
         ):
             LightSequence.create_from_pattern(['{"delay": 1}'])
 
+    @pytest.mark.parametrize(
+        "rgb", ['"red"', "[255, 0]", "[255, 0, 0, 0]", "[256, 0, 0]", "[-1, 0, 0]", "[true, 0, 0]"]
+    )
+    def test_bad_color_is_rejected(self, rgb: str) -> None:
+        with pytest.raises(Exception, match="Error in entry #1: color must be 3 numbers"):
+            LightSequence.create_from_pattern(['{"rgb": %s}' % rgb])
+
+    def test_float_color_is_accepted(self) -> None:
+        """HA's rgb_color coerces floats, so saved patterns using them keep working."""
+        seq = LightSequence.create_from_pattern(['{"rgb": [255.0, 0, 0]}'])
+        [color] = _set_color_steps(seq)
+        assert color.rgb == (255.0, 0, 0)
+
     def test_json_rgb_is_stored_as_tuple(self) -> None:
         """JSON lists become tuples so a black step compares equal to OFF_RGB."""
         seq = LightSequence.create_from_pattern(['{"rgb": [0, 0, 0], "transition": 2}'])

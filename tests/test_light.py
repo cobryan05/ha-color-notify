@@ -21,7 +21,6 @@ from custom_components.color_notify.light import (
 from custom_components.color_notify.const import (
     DEFAULT_PRIORITY,
     EXPECTED_SERVICE_CALL_TIMEOUT,
-    MAXIMUM_PRIORITY,
     OFF_RGB,
 )
 
@@ -541,89 +540,210 @@ class TestWrappedLightAvailability:
         entity._handle_wrapped_light_init.assert_not_awaited()
 
 
+def _alert(priority: int, notify_id: str = "alert", **kwargs) -> _NotificationSequence:
+    return _NotificationSequence(
+        notify_id=notify_id,
+        pattern=[ColorInfo((255, 0, 0), 255)],
+        priority=priority,
+        **kwargs,
+    )
+
+
+def _make_worker_entity() -> NotificationLightEntity:
+    """Entity whose queue is processed by the real worker, minus the bulb."""
+    entity, _entry = make_entity()
+    del entity.async_turn_on
+    del entity.async_turn_off
+    entity._active_sequences["off"] = LIGHT_OFF_SEQUENCE
+    entity._process_sequence_list = AsyncMock()
+    return entity
+
+
+async def _run_queue(entity: NotificationLightEntity) -> None:
+    """Run the worker until everything queued so far has been processed.
+
+    One worker per entity stays alive for the test: cancelling it would leave
+    its pending queue.get() behind to swallow the next item.
+    """
+    if getattr(entity, "_test_worker", None) is None:
+        entity._test_worker = asyncio.create_task(entity._work_loop())
+    await asyncio.wait_for(entity._task_queue.join(), timeout=1)
+
+
+@pytest.fixture
+def call_later():
+    """Capture peek-restore timers instead of scheduling them on a real loop."""
+    with patch("custom_components.color_notify.light.async_call_later") as mock:
+        mock.cancels = []
+
+        def _schedule(hass, delay, action):
+            mock.cancels.append(MagicMock(name="cancel"))
+            return mock.cancels[-1]
+
+        mock.side_effect = _schedule
+        yield mock
+
+
+@pytest.mark.usefixtures("call_later")
 class TestTurnOnDynamicPriority:
-    def _make_entity(self) -> tuple[NotificationLightEntity, list[_NotificationSequence]]:
-        entity, _entry = make_entity()
-        del entity.async_turn_on
-        entity._active_sequences["off"] = LIGHT_OFF_SEQUENCE
-        captured: list[_NotificationSequence] = []
-
-        async def capture_add(notify_id, sequence, log_trigger=None) -> None:
-            captured.append(sequence)
-            entity._active_sequences[notify_id] = sequence
-            entity._sort_active_sequences()
-
-        entity._add_sequence = capture_add
-        return entity, captured
-
     async def test_repeated_turn_on_does_not_raise_priority(self) -> None:
         """Calling turn_on while already on (e.g. brightness changes) keeps the same priority."""
-        entity, captured = self._make_entity()
+        entity = _make_worker_entity()
 
+        priorities = []
         for _ in range(3):
             await entity.async_turn_on()
+            await _run_queue(entity)
+            priorities.append(entity._active_sequences["on"].priority)
 
-        assert [seq.priority for seq in captured] == [DEFAULT_PRIORITY + 0.5] * 3
+        assert priorities == [DEFAULT_PRIORITY + 0.5] * 3
 
     async def test_turn_on_outranks_current_top_notification(self) -> None:
-        entity, captured = self._make_entity()
-        entity._active_sequences["alert"] = _NotificationSequence(
-            notify_id="alert",
-            pattern=[ColorInfo((255, 0, 0), 255)],
-            priority=DEFAULT_PRIORITY + 100,
-        )
+        entity = _make_worker_entity()
+        entity._active_sequences["alert"] = _alert(DEFAULT_PRIORITY + 100)
         entity._sort_active_sequences()
 
-        await entity.async_turn_on()
-        await entity.async_turn_on()
+        priorities = []
+        for _ in range(2):
+            await entity.async_turn_on()
+            await _run_queue(entity)
+            priorities.append(entity._active_sequences["on"].priority)
 
-        assert [seq.priority for seq in captured] == [DEFAULT_PRIORITY + 100.5] * 2
+        assert priorities == [DEFAULT_PRIORITY + 100.5] * 2
+        assert next(iter(entity._active_sequences)) == "on"
 
     async def test_turn_on_uses_configured_priority_when_not_dynamic(self) -> None:
-        entity, captured = self._make_entity()
+        entity = _make_worker_entity()
         entity._dynamic_priority = False
         entity._light_on_priority = 10
 
         await entity.async_turn_on()
+        await _run_queue(entity)
 
-        assert captured[0].priority == 10
+        assert entity._active_sequences["on"].priority == 10
 
-    async def test_turn_on_ignores_peek_boost(self) -> None:
-        """A notification peeking at natural + MAXIMUM_PRIORITY doesn't inflate light-on."""
-        entity, captured = self._make_entity()
-        entity._active_sequences["alert"] = _NotificationSequence(
-            notify_id="alert",
-            pattern=[ColorInfo((255, 0, 0), 255)],
-            priority=DEFAULT_PRIORITY + 100 + MAXIMUM_PRIORITY,
-        )
+    async def test_turn_on_overrides_active_peek(self) -> None:
+        """Dynamic turn_on ends a peek and bases light-on on the natural priority."""
+        entity = _make_worker_entity()
+        alert = _alert(DEFAULT_PRIORITY + 100)
+        cancel_restore = MagicMock()
+        alert.start_peek(cancel_restore)
+        entity._active_sequences["alert"] = alert
         entity._sort_active_sequences()
 
         await entity.async_turn_on()
+        await _run_queue(entity)
 
-        assert captured[0].priority == DEFAULT_PRIORITY + 100.5
+        assert not alert.peeking
+        cancel_restore.assert_called_once()
+        assert entity._active_sequences["on"].priority == DEFAULT_PRIORITY + 100.5
+        assert next(iter(entity._active_sequences)) == "on"
+
+    async def test_non_dynamic_turn_on_leaves_peek_running(self) -> None:
+        entity = _make_worker_entity()
+        entity._dynamic_priority = False
+        alert = _alert(DEFAULT_PRIORITY)
+        alert.start_peek(None)
+        entity._active_sequences["alert"] = alert
+        entity._sort_active_sequences()
+
+        await entity.async_turn_on()
+        await _run_queue(entity)
+
+        assert alert.peeking
+        assert next(iter(entity._active_sequences)) == "alert"
+
+    async def test_toggle_during_peek_shows_light_then_turns_off(self) -> None:
+        entity = _make_worker_entity()
+        await entity.async_turn_on()
+        await _run_queue(entity)
+
+        alert = _alert(DEFAULT_PRIORITY)
+        alert.start_peek(None)
+        entity._active_sequences["alert"] = alert
+        entity._sort_active_sequences()
+
+        await entity.async_toggle()
+        await _run_queue(entity)
+        assert entity.is_on
+        assert next(iter(entity._active_sequences)) == "on"
+
+        await entity.async_toggle()
+        await _run_queue(entity)
+        assert not entity.is_on
+        assert "on" not in entity._active_sequences
 
     async def test_worker_recomputes_priority_after_queued_adds(self) -> None:
         """A notification queued just before turn_on is counted once the worker runs."""
-        entity, _entry = make_entity()
-        del entity.async_turn_on
-        entity._active_sequences["off"] = LIGHT_OFF_SEQUENCE
-        entity._process_sequence_list = AsyncMock()
+        entity = _make_worker_entity()
 
-        alert = _NotificationSequence(
-            notify_id="alert",
-            pattern=[ColorInfo((255, 0, 0), 255)],
-            priority=DEFAULT_PRIORITY + 100,
-            peek_enabled=False,
-        )
         # Both are queued before the worker processes either one.
-        await entity._add_sequence("alert", alert)
+        await entity._add_sequence("alert", _alert(DEFAULT_PRIORITY + 100, peek_enabled=False))
         await entity.async_turn_on()
-
-        worker = asyncio.create_task(entity._work_loop())
-        try:
-            await asyncio.wait_for(entity._task_queue.join(), timeout=1)
-        finally:
-            worker.cancel()
+        await _run_queue(entity)
 
         assert next(iter(entity._active_sequences)) == "on"
         assert entity._active_sequences["on"].priority == DEFAULT_PRIORITY + 100.5
+
+
+class TestPeek:
+    async def _add(self, entity: NotificationLightEntity, seq: _NotificationSequence) -> None:
+        await entity._add_sequence(seq.notify_id, seq)
+        await _run_queue(entity)
+
+    @pytest.mark.parametrize("priority", [DEFAULT_PRIORITY - 1, DEFAULT_PRIORITY])
+    async def test_new_notification_at_or_below_top_peeks(self, call_later, priority) -> None:
+        """A peek-enabled notification always shows immediately, ties included."""
+        entity = _make_worker_entity()
+        await self._add(entity, _alert(DEFAULT_PRIORITY, "first", peek_enabled=False))
+
+        new = _alert(priority, "new")
+        await self._add(entity, new)
+
+        assert new.peeking
+        assert next(iter(entity._active_sequences)) == "new"
+        call_later.assert_called_once()
+
+    async def test_new_top_priority_does_not_peek(self, call_later) -> None:
+        entity = _make_worker_entity()
+        await self._add(entity, _alert(DEFAULT_PRIORITY, "first", peek_enabled=False))
+
+        new = _alert(DEFAULT_PRIORITY + 1, "new")
+        await self._add(entity, new)
+
+        assert not new.peeking
+        call_later.assert_not_called()
+
+    async def test_peek_expiry_restores_natural_order(self, call_later) -> None:
+        entity = _make_worker_entity()
+        await self._add(entity, _alert(DEFAULT_PRIORITY, "first", peek_enabled=False))
+        new = _alert(DEFAULT_PRIORITY - 1, "new")
+        await self._add(entity, new)
+
+        restore = call_later.call_args.args[2]
+        await restore(None)
+
+        assert not new.peeking
+        assert next(iter(entity._active_sequences)) == "first"
+        assert "peek expired" in entity._task_queue.get_nowait().log_trigger
+
+    async def test_removal_cancels_pending_restore(self, call_later) -> None:
+        """A re-enabled notification isn't cut short by the old peek's timer."""
+        entity = _make_worker_entity()
+        await self._add(entity, _alert(DEFAULT_PRIORITY, "first", peek_enabled=False))
+        old = _alert(DEFAULT_PRIORITY - 1, "new")
+        await self._add(entity, old)
+        await entity._remove_sequence("new")
+        await _run_queue(entity)
+
+        assert not old.peeking
+        call_later.cancels[0].assert_called_once()
+        assert "new" not in entity._active_sequences
+
+        # Firing the stale timer must not touch the re-added notification.
+        stale_restore = call_later.call_args.args[2]
+        readded = _alert(DEFAULT_PRIORITY - 1, "new")
+        await self._add(entity, readded)
+        await stale_restore(None)
+
+        assert readded.peeking

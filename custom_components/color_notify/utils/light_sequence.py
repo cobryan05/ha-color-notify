@@ -126,6 +126,21 @@ class LightSequence:
                             raise ValueError(
                                 f"missing color: provide '{ATTR_RGB_COLOR}' or '{CONF_RGB}'"
                             )
+                        # Same shape HA's rgb_color accepts: 3 numbers, 0-255.
+                        if (
+                            not isinstance(rgb, list)
+                            or len(rgb) != 3
+                            or any(
+                                isinstance(c, bool)
+                                or not isinstance(c, (int, float))
+                                or not 0 <= c <= 255
+                                for c in rgb
+                            )
+                        ):
+                            raise ValueError(
+                                "color must be 3 numbers from 0 to 255"
+                                f" (e.g. [255, 0, 0]), got {rgb!r}"
+                            )
                         # JSON yields lists; store a tuple so it compares equal to
                         # tuple constants such as OFF_RGB.
                         rgb = tuple(rgb)
