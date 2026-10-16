@@ -19,6 +19,7 @@ from homeassistant.components.light import (
     ATTR_COLOR_TEMP_KELVIN,
     ATTR_HS_COLOR,
     ATTR_RGB_COLOR,
+    ATTR_TRANSITION,
     ATTR_XY_COLOR,
     ColorMode,
     LightEntity,
@@ -34,6 +35,8 @@ from homeassistant.const import (
     SERVICE_TURN_ON,
     STATE_OFF,
     STATE_ON,
+    STATE_UNKNOWN,
+    STATE_UNAVAILABLE,
     Platform,
 )
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
@@ -302,7 +305,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         self._running_sequences: dict[str, _NotificationSequence] = {}
         self._active_sequences: dict[str, _NotificationSequence] = {}
         self._last_set_color: ColorInfo | None = None
-        self._dynamic_priority: bool = self._config_entry.options.get(
+        self._dynamic_priority: bool = self._config_entry.data.get(
             CONF_DYNAMIC_PRIORITY, True
         )
         self._response_expected_expire_time: float = 0.0
@@ -311,7 +314,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         self._task: asyncio.Task | None = None
         self._preview_cancel: Callable | None = None
 
-        self._light_on_priority: int = config_entry.options.get(
+        self._light_on_priority: int = config_entry.data.get(
             CONF_PRIORITY, DEFAULT_PRIORITY
         )
         self._last_on_rgb: tuple = tuple(
@@ -619,7 +622,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
                     if (
                         peek_duration > 0
                         and item.sequence.peek_enabled
-                        and item.notify_id != STATE_OFF
+                        and item.notify_id not in (STATE_OFF, STATE_ON)
                         and item.sequence.priority <= current_top_priority
                     ):
                         auto_clears = (
@@ -779,9 +782,12 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
 
         self._event_logger.update_message(f"{log_trigger}, displaying {displaying}")
 
-    def _reset_expected_response_timeout(self):
+    def _reset_expected_response_timeout(
+        self, extra_sec: float = 0.0
+    ) -> None:
+        """Reset the expected response timeout, including transition duration."""
         self._response_expected_expire_time = (
-            time.time() + EXPECTED_SERVICE_CALL_TIMEOUT
+            time.time() + EXPECTED_SERVICE_CALL_TIMEOUT + extra_sec
         )
 
     async def _handle_notification_change(
@@ -824,13 +830,26 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         self, event: Event[EventStateChangedData]
     ) -> None:
         """Handle the underlying wrapped light changing state."""
-        if event.data["old_state"] is None:
+        old_state = event.data["old_state"]
+
+        # The entity is new, or is becoming available again.
+        # Treat this as initialization rather than an unexpected change.
+        if old_state is None or old_state.state in (
+            STATE_UNKNOWN,
+            STATE_UNAVAILABLE,
+        ):
+            # Force the current display color to be reapplied when the
+            # underlying light becomes available again.
+            self._last_set_color = None
             await self._handle_wrapped_light_init()
-        elif time.time() > self._response_expected_expire_time:
+            return
+
+        if time.time() > self._response_expected_expire_time:
             _LOGGER.warning(
-                "%s received unexpected event %s", self.entity_id, str(event.data)
+                "%s received unexpected event %s",
+                self.entity_id,
+                str(event.data),
             )
-            # Current state is unknown, just reset
             await self._reset_running_sequences()
 
     async def _handle_wrapped_light_init(self) -> None:
@@ -877,7 +896,9 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             kwargs[ATTR_HS_COLOR] = (h, s)
             kwargs[ATTR_BRIGHTNESS] = brightness
 
-        self._reset_expected_response_timeout()
+        self._reset_expected_response_timeout(
+            extra_sec=kwargs.get(ATTR_TRANSITION) or 0
+        )
         await self.hass.services.async_call(
             Platform.LIGHT,
             SERVICE_TURN_ON,
@@ -939,6 +960,19 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         if self._dynamic_priority:
             # Dynamic priority gets 0.5 boost of top priority to ensure light-on always shows.
             priority = max(priority, self._get_top_sequences()[0].priority) + 0.5
+
+        top_sequences = self._get_top_sequences()
+        top_priority = top_sequences[0].priority if top_sequences else None
+
+        _LOGGER.debug(
+            "%s: dynamic_priority=%s, configured_priority=%s, "
+            "top_priority=%s, effective_priority=%s",
+            self.entity_id,
+            self._dynamic_priority,
+            self._light_on_priority,
+            top_priority,
+            priority,
+        )
 
         self._last_on_rgb = rgb
         sequence = _NotificationSequence(

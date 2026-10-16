@@ -76,7 +76,7 @@
                     "delay_time": "Auto-clear timeout",
                     "expire_enabled": "Automatically clear after timeout?",
                     "name": "Name for notification",
-                    "pattern": "eg, '[' or '], loopcnt' or '{{\"rgb\": [255,0,0], \"delay\": 1.5}}'",
+                    "pattern": "eg, '[' or '], loopcnt' or '{{\"rgb\": [255,0,0], \"delay\": 1, \"transition\": 0.5}}'",
                     "peek_enabled": "Temporarily show on activation, regardless of priority.",
                     "test_action": "Submit action",
                     "test_light": "Preview light",
@@ -84,7 +84,7 @@
                 },
                 "data_description": {
                     "color_picker": "If no pattern steps are defined above, this color is the notification's display color. To add this color as a step in the sequence, choose 'Append selected color to pattern' below.",
-                    "pattern": "Each '+' entry is a color step. Use '[' to open a loop and '], N' to close it (N = 0 for infinite). Leave empty to show a solid color instead."
+                    "pattern": "Each '+' entry is a color step. Add an optional 'transition' value in seconds to fade into that step's color. The 'delay' value still controls the time until the next step. Use '[' to open a loop and '],N' to close it (remove ,N for infinite). Leave empty to show a solid color instead."
                 },
                 "description": "Set up the notification below.\n&bull;Auto-Clear with a 0s timeout clears immediately after the pattern finishes.\n&bull;Any other timeout is measured from notification start.\n&bull;Larger numbers are higher priority."
             },
@@ -106,7 +106,7 @@
                     "delay_time": "Auto-clear timeout",
                     "expire_enabled": "Automatically clear after timeout?",
                     "name": "Name for notification",
-                    "pattern": "eg, '[' or '], loopcnt' or '{{\"rgb\": [255,0,0], \"delay\": 1.5}}'",
+                    "pattern": "eg, '[' or '], loopcnt' or '{{\"rgb\": [255,0,0], \"delay\": 1, \"transition\": 0.5}}'",
                     "peek_enabled": "Temporarily show on activation, regardless of priority.",
                     "test_action": "Submit action",
                     "test_light": "Preview light",
@@ -114,7 +114,7 @@
                 },
                 "data_description": {
                     "color_picker": "If no pattern steps are defined above, this color is the notification's display color. To add this color as a step in the sequence, choose 'Append selected color to pattern' below.",
-                    "pattern": "Each '+' entry is a color step. Use '[' to open a loop and '], N' to close it (N = 0 for infinite). Leave empty to show a solid color instead."
+                    "pattern": "Each '+' entry is a color step. Add an optional 'transition' value in seconds to fade into that step's color. The 'delay' value still controls the time until the next step. Use '[' to open a loop and '],N' to close it (remove ,N for infinite). Leave empty to show a solid color instead."
                 },
                 "description": "Set up the notification below.\n&bull;Auto-Clear with a 0s timeout clears immediately after the pattern finishes.\n&bull;Any other timeout is measured from notification start.\n&bull;Larger numbers are higher priority."
             },
