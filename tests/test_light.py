@@ -11,13 +11,19 @@ from custom_components.color_notify.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_MODE,
     ColorInfo,
+    ColorMode,
     LIGHT_OFF_SEQUENCE,
     LIGHT_ON_SEQUENCE,
     NotificationLightEntity,
     WARM_WHITE_RGB,
     _NotificationSequence,
 )
-from custom_components.color_notify.const import DEFAULT_PRIORITY
+from custom_components.color_notify.const import (
+    DEFAULT_PRIORITY,
+    EXPECTED_SERVICE_CALL_TIMEOUT,
+    MAXIMUM_PRIORITY,
+    OFF_RGB,
+)
 
 
 class FakeState:
@@ -442,3 +448,182 @@ class TestAutoClearOnCompletion:
         await seq._worker_func(stop_event)
 
         seq._hass.services.async_call.assert_called_once()
+
+
+class TestWrappedLightTransitions:
+    def _make_entity(self) -> NotificationLightEntity:
+        entity, _entry = make_entity()
+        entity._wrapped_init_done = True
+        entity._attr_supported_color_modes = {ColorMode.RGB}
+        entity.hass.services.async_call = AsyncMock()
+        return entity
+
+    async def test_step_to_black_fades_off_with_transition(self) -> None:
+        """A black step with a transition turns the bulb off using that transition."""
+        entity = self._make_entity()
+
+        await entity._wrapped_light_turn_on(rgb_color=OFF_RGB, transition=2.0)
+
+        _platform, service = entity.hass.services.async_call.await_args.args
+        service_data = entity.hass.services.async_call.await_args.kwargs["service_data"]
+        assert service == "turn_off"
+        assert service_data == {"entity_id": "light.test", "transition": 2.0}
+
+    async def test_step_to_black_without_transition_turns_off_plainly(self) -> None:
+        entity = self._make_entity()
+
+        await entity._wrapped_light_turn_on(rgb_color=OFF_RGB)
+
+        service_data = entity.hass.services.async_call.await_args.kwargs["service_data"]
+        assert service_data == {"entity_id": "light.test"}
+
+    async def test_json_pattern_black_step_fades_off(self) -> None:
+        """A black step parsed from a JSON pattern takes the fade-off path."""
+        entity = self._make_entity()
+        seq = _NotificationSequence(pattern=['{"rgb": [0, 0, 0], "transition": 2}'])
+
+        await entity._wrapped_light_turn_on(**seq.color.light_params)
+
+        _platform, service = entity.hass.services.async_call.await_args.args
+        assert service == "turn_off"
+
+    async def test_list_black_rgb_turns_off(self) -> None:
+        entity = self._make_entity()
+
+        await entity._wrapped_light_turn_on(rgb_color=[0, 0, 0], transition=1.0)
+
+        _platform, service = entity.hass.services.async_call.await_args.args
+        assert service == "turn_off"
+
+    @pytest.mark.parametrize("rgb", [(255, 0, 0), OFF_RGB])
+    async def test_transition_extends_expected_response_window(self, rgb: tuple) -> None:
+        """State updates during a fade aren't treated as unexpected outside changes."""
+        entity = self._make_entity()
+
+        with patch("time.time", return_value=1000.0):
+            await entity._wrapped_light_turn_on(rgb_color=rgb, transition=3.0)
+
+        assert entity._response_expected_expire_time == 1000.0 + EXPECTED_SERVICE_CALL_TIMEOUT + 3.0
+
+
+class TestWrappedLightAvailability:
+    def _make_entity(self) -> NotificationLightEntity:
+        entity, _entry = make_entity()
+        entity._handle_wrapped_light_init = AsyncMock()
+        entity._reset_running_sequences = AsyncMock()
+        entity._last_set_color = ColorInfo((255, 0, 0))
+        return entity
+
+    @staticmethod
+    def _event(old_state: FakeState | None) -> MagicMock:
+        event = MagicMock()
+        event.data = {"old_state": old_state, "new_state": FakeState("on")}
+        return event
+
+    @pytest.mark.parametrize("old_state", [None, FakeState("unavailable"), FakeState("unknown")])
+    async def test_becoming_available_reapplies_current_color(self, old_state) -> None:
+        """Returning from unavailable re-initializes and forces the color to be resent."""
+        entity = self._make_entity()
+
+        await entity._handle_wrapped_light_change(self._event(old_state))
+
+        entity._handle_wrapped_light_init.assert_awaited_once()
+        entity._reset_running_sequences.assert_not_awaited()
+        assert entity._last_set_color is None
+
+    async def test_unexpected_change_still_resets_sequences(self) -> None:
+        entity = self._make_entity()
+        entity._response_expected_expire_time = 0.0
+
+        await entity._handle_wrapped_light_change(self._event(FakeState("on")))
+
+        entity._reset_running_sequences.assert_awaited_once()
+        entity._handle_wrapped_light_init.assert_not_awaited()
+
+
+class TestTurnOnDynamicPriority:
+    def _make_entity(self) -> tuple[NotificationLightEntity, list[_NotificationSequence]]:
+        entity, _entry = make_entity()
+        del entity.async_turn_on
+        entity._active_sequences["off"] = LIGHT_OFF_SEQUENCE
+        captured: list[_NotificationSequence] = []
+
+        async def capture_add(notify_id, sequence, log_trigger=None) -> None:
+            captured.append(sequence)
+            entity._active_sequences[notify_id] = sequence
+            entity._sort_active_sequences()
+
+        entity._add_sequence = capture_add
+        return entity, captured
+
+    async def test_repeated_turn_on_does_not_raise_priority(self) -> None:
+        """Calling turn_on while already on (e.g. brightness changes) keeps the same priority."""
+        entity, captured = self._make_entity()
+
+        for _ in range(3):
+            await entity.async_turn_on()
+
+        assert [seq.priority for seq in captured] == [DEFAULT_PRIORITY + 0.5] * 3
+
+    async def test_turn_on_outranks_current_top_notification(self) -> None:
+        entity, captured = self._make_entity()
+        entity._active_sequences["alert"] = _NotificationSequence(
+            notify_id="alert",
+            pattern=[ColorInfo((255, 0, 0), 255)],
+            priority=DEFAULT_PRIORITY + 100,
+        )
+        entity._sort_active_sequences()
+
+        await entity.async_turn_on()
+        await entity.async_turn_on()
+
+        assert [seq.priority for seq in captured] == [DEFAULT_PRIORITY + 100.5] * 2
+
+    async def test_turn_on_uses_configured_priority_when_not_dynamic(self) -> None:
+        entity, captured = self._make_entity()
+        entity._dynamic_priority = False
+        entity._light_on_priority = 10
+
+        await entity.async_turn_on()
+
+        assert captured[0].priority == 10
+
+    async def test_turn_on_ignores_peek_boost(self) -> None:
+        """A notification peeking at natural + MAXIMUM_PRIORITY doesn't inflate light-on."""
+        entity, captured = self._make_entity()
+        entity._active_sequences["alert"] = _NotificationSequence(
+            notify_id="alert",
+            pattern=[ColorInfo((255, 0, 0), 255)],
+            priority=DEFAULT_PRIORITY + 100 + MAXIMUM_PRIORITY,
+        )
+        entity._sort_active_sequences()
+
+        await entity.async_turn_on()
+
+        assert captured[0].priority == DEFAULT_PRIORITY + 100.5
+
+    async def test_worker_recomputes_priority_after_queued_adds(self) -> None:
+        """A notification queued just before turn_on is counted once the worker runs."""
+        entity, _entry = make_entity()
+        del entity.async_turn_on
+        entity._active_sequences["off"] = LIGHT_OFF_SEQUENCE
+        entity._process_sequence_list = AsyncMock()
+
+        alert = _NotificationSequence(
+            notify_id="alert",
+            pattern=[ColorInfo((255, 0, 0), 255)],
+            priority=DEFAULT_PRIORITY + 100,
+            peek_enabled=False,
+        )
+        # Both are queued before the worker processes either one.
+        await entity._add_sequence("alert", alert)
+        await entity.async_turn_on()
+
+        worker = asyncio.create_task(entity._work_loop())
+        try:
+            await asyncio.wait_for(entity._task_queue.join(), timeout=1)
+        finally:
+            worker.cancel()
+
+        assert next(iter(entity._active_sequences)) == "on"
+        assert entity._active_sequences["on"].priority == DEFAULT_PRIORITY + 100.5
