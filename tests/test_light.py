@@ -521,3 +521,50 @@ class TestWrappedLightAvailability:
         entity._reset_running_sequences.assert_awaited_once()
         entity._handle_wrapped_light_init.assert_not_awaited()
 
+
+class TestTurnOnDynamicPriority:
+    def _make_entity(self) -> tuple[NotificationLightEntity, list[_NotificationSequence]]:
+        entity, _entry = make_entity()
+        del entity.async_turn_on
+        entity._active_sequences["off"] = LIGHT_OFF_SEQUENCE
+        captured: list[_NotificationSequence] = []
+
+        async def capture_add(notify_id, sequence, log_trigger=None) -> None:
+            captured.append(sequence)
+            entity._active_sequences[notify_id] = sequence
+            entity._sort_active_sequences()
+
+        entity._add_sequence = capture_add
+        return entity, captured
+
+    async def test_repeated_turn_on_does_not_raise_priority(self) -> None:
+        """Calling turn_on while already on (e.g. brightness changes) keeps the same priority."""
+        entity, captured = self._make_entity()
+
+        for _ in range(3):
+            await entity.async_turn_on()
+
+        assert [seq.priority for seq in captured] == [DEFAULT_PRIORITY + 0.5] * 3
+
+    async def test_turn_on_outranks_current_top_notification(self) -> None:
+        entity, captured = self._make_entity()
+        entity._active_sequences["alert"] = _NotificationSequence(
+            notify_id="alert",
+            pattern=[ColorInfo((255, 0, 0), 255)],
+            priority=DEFAULT_PRIORITY + 100,
+        )
+        entity._sort_active_sequences()
+
+        await entity.async_turn_on()
+        await entity.async_turn_on()
+
+        assert [seq.priority for seq in captured] == [DEFAULT_PRIORITY + 100.5] * 2
+
+    async def test_turn_on_uses_configured_priority_when_not_dynamic(self) -> None:
+        entity, captured = self._make_entity()
+        entity._dynamic_priority = False
+        entity._light_on_priority = 10
+
+        await entity.async_turn_on()
+
+        assert captured[0].priority == 10

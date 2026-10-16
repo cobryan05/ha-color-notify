@@ -964,13 +964,22 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         else:
             rgb = self._last_on_rgb
 
-        priority = self._light_on_priority
-        if self._dynamic_priority:
-            # Dynamic priority gets 0.5 boost of top priority to ensure light-on always shows.
-            priority = max(priority, self._get_top_sequences()[0].priority) + 0.5
+        # Highest priority among everything except the light-on entry itself, so
+        # repeated turn_on calls (e.g. brightness changes) don't keep stacking +0.5.
+        # _active_sequences is kept sorted descending, so the first match is the top.
+        top_priority = next(
+            (
+                seq.priority
+                for notify_id, seq in self._active_sequences.items()
+                if notify_id != STATE_ON
+            ),
+            None,
+        )
 
-        top_sequences = self._get_top_sequences()
-        top_priority = top_sequences[0].priority if top_sequences else None
+        priority = self._light_on_priority
+        if self._dynamic_priority and top_priority is not None:
+            # Dynamic priority gets 0.5 boost of top priority to ensure light-on always shows.
+            priority = max(priority, top_priority) + 0.5
 
         _LOGGER.debug(
             "%s: dynamic_priority=%s, configured_priority=%s, "
