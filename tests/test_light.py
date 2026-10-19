@@ -747,3 +747,64 @@ class TestPeek:
         await stale_restore(None)
 
         assert readded.peeking
+
+    async def test_readd_while_peeking_compares_against_others(self, call_later) -> None:
+        """Re-adding a peeking notification ignores its own old copy when deciding to peek."""
+        entity = _make_worker_entity()
+        await self._add(entity, _alert(10, "b", peek_enabled=False))
+        await self._add(entity, _alert(3, "a"))
+
+        readded = _alert(5, "a")
+        await self._add(entity, readded)
+
+        assert readded.peeking
+        assert next(iter(entity._active_sequences)) == "a"
+
+    async def test_readd_alone_does_not_peek_against_itself(self, call_later) -> None:
+        entity = _make_worker_entity()
+        await self._add(entity, _alert(DEFAULT_PRIORITY, "a"))
+
+        readded = _alert(DEFAULT_PRIORITY, "a")
+        await self._add(entity, readded)
+
+        assert not readded.peeking
+
+    async def test_readd_stops_old_animation(self, call_later) -> None:
+        """The replacement must not be skipped because the old copy is still running."""
+        entity = _make_worker_entity()
+        old = _alert(DEFAULT_PRIORITY, "a")
+        await self._add(entity, old)
+        old.stop = AsyncMock()
+        entity._running_sequences["a"] = old
+
+        await self._add(entity, _alert(DEFAULT_PRIORITY, "a"))
+
+        old.stop.assert_awaited_once()
+        assert "a" not in entity._running_sequences
+
+    async def test_removal_from_hass_cancels_peek_timers(self, call_later) -> None:
+        entity = _make_worker_entity()
+        await self._add(entity, _alert(DEFAULT_PRIORITY, "first", peek_enabled=False))
+        new = _alert(DEFAULT_PRIORITY - 1, "new")
+        await self._add(entity, new)
+
+        await entity.async_will_remove_from_hass()
+
+        assert not new.peeking
+        call_later.cancels[0].assert_called_once()
+
+
+@pytest.mark.usefixtures("call_later")
+class TestToggleBeforeWorkerCatchesUp:
+    async def test_double_toggle_ends_off(self) -> None:
+        """Two toggles queued before the worker runs turn the light on, then off."""
+        entity = _make_worker_entity()
+        entity._active_sequences["alert"] = _alert(DEFAULT_PRIORITY + 100)
+        entity._sort_active_sequences()
+
+        await entity.async_toggle()
+        await entity.async_toggle()
+        await _run_queue(entity)
+
+        assert not entity.is_on
+        assert "on" not in entity._active_sequences

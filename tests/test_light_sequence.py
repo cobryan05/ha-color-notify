@@ -6,6 +6,7 @@ from custom_components.color_notify.const import OFF_RGB
 from custom_components.color_notify.utils.light_sequence import (
     ColorInfo,
     LightSequence,
+    _StepDelay,
     _StepSetColor,
 )
 
@@ -112,5 +113,42 @@ class TestLoopCounts:
 
     @pytest.mark.parametrize("close", ["], -1", "], 2, 3", "], abc", "],", "] 2", "]x"])
     def test_malformed_loop_count_is_rejected(self, close: str) -> None:
-        with pytest.raises(Exception, match="Error in entry #3: loop count must be"):
+        with pytest.raises(Exception, match="Error in entry #3: loop count must be") as exc:
             LightSequence.create_from_pattern(["[", '{"rgb": [255, 0, 0]}', close])
+        assert "To loop forever, use ']' with no count" in str(exc.value)
+
+    @pytest.mark.parametrize(
+        ("close", "forever"),
+        [("], -1", True), ("],-1", True), ("], 2, 3", True), ("] 2", True), ("]x", True), ("], 2", False)],
+    )
+    def test_saved_legacy_loop_close_still_plays(self, close: str, forever: bool) -> None:
+        """Non-strict parsing keeps patterns saved by older versions working."""
+        seq = LightSequence.create_from_pattern(
+            ["[", '{"rgb": [255, 0, 0]}', close], strict=False
+        )
+        assert seq.loops_forever is forever
+
+    @pytest.mark.parametrize("close", ["], abc", "],"])
+    def test_legacy_parsing_still_rejects_what_never_worked(self, close: str) -> None:
+        with pytest.raises(Exception, match="loop count must be"):
+            LightSequence.create_from_pattern(
+                ["[", '{"rgb": [255, 0, 0]}', close], strict=False
+            )
+
+
+class TestDelayParsing:
+    @pytest.mark.parametrize("bad_value", ['"1"', '"slow"', "true", "-1", "[1]"])
+    def test_invalid_delay_is_rejected_with_fix(self, bad_value: str) -> None:
+        with pytest.raises(Exception, match="'delay' must be a finite, non-negative number") as exc:
+            LightSequence.create_from_pattern(['{"rgb": [255, 0, 0], "delay": %s}' % bad_value])
+        assert 'e.g. "delay": 1' in str(exc.value)
+
+    def test_saved_quoted_delay_still_plays(self) -> None:
+        seq = LightSequence.create_from_pattern(
+            ['{"rgb": [255, 0, 0], "delay": "1.5"}'], strict=False
+        )
+        assert [s._delay for s in seq._steps if isinstance(s, _StepDelay)] == [1.5]
+
+    def test_zero_delay_adds_no_step(self) -> None:
+        seq = LightSequence.create_from_pattern(['{"rgb": [255, 0, 0], "delay": 0}'])
+        assert not any(isinstance(s, _StepDelay) for s in seq._steps)
