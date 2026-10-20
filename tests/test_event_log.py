@@ -327,7 +327,6 @@ class TestProcessSequenceListEventLog:
 
     async def test_peeking_label_shown_when_boost_causes_win(self):
         """'(peeking)' appears when the notification wins only because of the priority boost."""
-        from custom_components.color_notify.const import MAXIMUM_PRIORITY
 
         logger = _make_mock_logger()
         entity, _ = _make_light_entity(log_entity=logger)
@@ -346,9 +345,11 @@ class TestProcessSequenceListEventLog:
         seq_low = _NotificationSequence(
             notify_id="switch.low_prio",
             pattern=[ColorInfo((0, 255, 0), 255)],
-            priority=3 + MAXIMUM_PRIORITY,  # boosted; un-boosted would be 3
+            priority=3,
         )
+        seq_low.start_peek(None)
         entity._active_sequences["switch.low_prio"] = seq_low
+        entity._sort_active_sequences()
         entity._running_sequences["switch.low_prio"] = seq_low
         entity._wrapped_light_turn_on = AsyncMock(return_value=True)
         await entity._process_sequence_list(log_trigger=_TEST_TRIGGER)
@@ -361,7 +362,7 @@ class TestProcessSequenceListEventLog:
         from custom_components.color_notify.const import MAXIMUM_PRIORITY
 
         # The boost condition in _work_loop is:
-        #   item.sequence.priority < current_top_priority
+        #   item.sequence.priority <= current_top_priority
         # When only STATE_OFF is active, current_top is 0. A notification with
         # priority 10 is already the natural top (10 > 0), so the condition is
         # False and priority must remain unchanged at its natural value.
@@ -451,20 +452,20 @@ class TestHandleStateChangeEventLog:
 
     async def test_notification_removed_trigger_uses_natural_priority(self):
         """Disabled trigger uses the natural (un-boosted) priority even when sequence is peeking."""
-        from custom_components.color_notify.const import MAXIMUM_PRIORITY
 
         entity, _ = _make_light_entity()
         notify_id = "switch.fire_alert"
 
         # Simulate a sequence that is currently peek-boosted; natural priority is 100.
-        _seed_active_seq(entity, notify_id, priority=100 + MAXIMUM_PRIORITY)
+        _seed_active_seq(entity, notify_id, priority=100)
+        entity._active_sequences[notify_id].start_peek(None)
 
         await entity._handle_notification_change(
             self._make_event(notify_id, STATE_OFF, {"friendly_name": "Fire Alert"})
         )
 
         item = entity._task_queue.get_nowait()
-        assert "pri 100" in item.log_trigger
+        assert "(pri 100)" in item.log_trigger
 
     async def test_notification_added_falls_back_to_entity_id(self):
         """entity_id is used in the trigger when there is no friendly name."""

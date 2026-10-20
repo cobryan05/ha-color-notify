@@ -11,13 +11,18 @@ from custom_components.color_notify.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_MODE,
     ColorInfo,
+    ColorMode,
     LIGHT_OFF_SEQUENCE,
     LIGHT_ON_SEQUENCE,
     NotificationLightEntity,
     WARM_WHITE_RGB,
     _NotificationSequence,
 )
-from custom_components.color_notify.const import DEFAULT_PRIORITY
+from custom_components.color_notify.const import (
+    DEFAULT_PRIORITY,
+    EXPECTED_SERVICE_CALL_TIMEOUT,
+    OFF_RGB,
+)
 
 
 class FakeState:
@@ -442,3 +447,364 @@ class TestAutoClearOnCompletion:
         await seq._worker_func(stop_event)
 
         seq._hass.services.async_call.assert_called_once()
+
+
+class TestWrappedLightTransitions:
+    def _make_entity(self) -> NotificationLightEntity:
+        entity, _entry = make_entity()
+        entity._wrapped_init_done = True
+        entity._attr_supported_color_modes = {ColorMode.RGB}
+        entity.hass.services.async_call = AsyncMock()
+        return entity
+
+    async def test_step_to_black_fades_off_with_transition(self) -> None:
+        """A black step with a transition turns the bulb off using that transition."""
+        entity = self._make_entity()
+
+        await entity._wrapped_light_turn_on(rgb_color=OFF_RGB, transition=2.0)
+
+        _platform, service = entity.hass.services.async_call.await_args.args
+        service_data = entity.hass.services.async_call.await_args.kwargs["service_data"]
+        assert service == "turn_off"
+        assert service_data == {"entity_id": "light.test", "transition": 2.0}
+
+    async def test_step_to_black_without_transition_turns_off_plainly(self) -> None:
+        entity = self._make_entity()
+
+        await entity._wrapped_light_turn_on(rgb_color=OFF_RGB)
+
+        service_data = entity.hass.services.async_call.await_args.kwargs["service_data"]
+        assert service_data == {"entity_id": "light.test"}
+
+    async def test_json_pattern_black_step_fades_off(self) -> None:
+        """A black step parsed from a JSON pattern takes the fade-off path."""
+        entity = self._make_entity()
+        seq = _NotificationSequence(pattern=['{"rgb": [0, 0, 0], "transition": 2}'])
+
+        await entity._wrapped_light_turn_on(**seq.color.light_params)
+
+        _platform, service = entity.hass.services.async_call.await_args.args
+        assert service == "turn_off"
+
+    async def test_list_black_rgb_turns_off(self) -> None:
+        entity = self._make_entity()
+
+        await entity._wrapped_light_turn_on(rgb_color=[0, 0, 0], transition=1.0)
+
+        _platform, service = entity.hass.services.async_call.await_args.args
+        assert service == "turn_off"
+
+    @pytest.mark.parametrize("rgb", [(255, 0, 0), OFF_RGB])
+    async def test_transition_extends_expected_response_window(self, rgb: tuple) -> None:
+        """State updates during a fade aren't treated as unexpected outside changes."""
+        entity = self._make_entity()
+
+        with patch("time.time", return_value=1000.0):
+            await entity._wrapped_light_turn_on(rgb_color=rgb, transition=3.0)
+
+        assert entity._response_expected_expire_time == 1000.0 + EXPECTED_SERVICE_CALL_TIMEOUT + 3.0
+
+
+class TestWrappedLightAvailability:
+    def _make_entity(self) -> NotificationLightEntity:
+        entity, _entry = make_entity()
+        entity._handle_wrapped_light_init = AsyncMock()
+        entity._reset_running_sequences = AsyncMock()
+        entity._last_set_color = ColorInfo((255, 0, 0))
+        return entity
+
+    @staticmethod
+    def _event(old_state: FakeState | None) -> MagicMock:
+        event = MagicMock()
+        event.data = {"old_state": old_state, "new_state": FakeState("on")}
+        return event
+
+    @pytest.mark.parametrize("old_state", [None, FakeState("unavailable"), FakeState("unknown")])
+    async def test_becoming_available_reapplies_current_color(self, old_state) -> None:
+        """Returning from unavailable re-initializes and forces the color to be resent."""
+        entity = self._make_entity()
+
+        await entity._handle_wrapped_light_change(self._event(old_state))
+
+        entity._handle_wrapped_light_init.assert_awaited_once()
+        entity._reset_running_sequences.assert_not_awaited()
+        assert entity._last_set_color is None
+
+    async def test_unexpected_change_still_resets_sequences(self) -> None:
+        entity = self._make_entity()
+        entity._response_expected_expire_time = 0.0
+
+        await entity._handle_wrapped_light_change(self._event(FakeState("on")))
+
+        entity._reset_running_sequences.assert_awaited_once()
+        entity._handle_wrapped_light_init.assert_not_awaited()
+
+
+def _alert(priority: int, notify_id: str = "alert", **kwargs) -> _NotificationSequence:
+    return _NotificationSequence(
+        notify_id=notify_id,
+        pattern=[ColorInfo((255, 0, 0), 255)],
+        priority=priority,
+        **kwargs,
+    )
+
+
+def _make_worker_entity() -> NotificationLightEntity:
+    """Entity whose queue is processed by the real worker, minus the bulb."""
+    entity, _entry = make_entity()
+    del entity.async_turn_on
+    del entity.async_turn_off
+    entity._active_sequences["off"] = LIGHT_OFF_SEQUENCE
+    entity._process_sequence_list = AsyncMock()
+    return entity
+
+
+async def _run_queue(entity: NotificationLightEntity) -> None:
+    """Run the worker until everything queued so far has been processed.
+
+    One worker per entity stays alive for the test: cancelling it would leave
+    its pending queue.get() behind to swallow the next item.
+    """
+    if getattr(entity, "_test_worker", None) is None:
+        entity._test_worker = asyncio.create_task(entity._work_loop())
+    await asyncio.wait_for(entity._task_queue.join(), timeout=1)
+
+
+@pytest.fixture
+def call_later():
+    """Capture peek-restore timers instead of scheduling them on a real loop."""
+    with patch("custom_components.color_notify.light.async_call_later") as mock:
+        mock.cancels = []
+
+        def _schedule(hass, delay, action):
+            mock.cancels.append(MagicMock(name="cancel"))
+            return mock.cancels[-1]
+
+        mock.side_effect = _schedule
+        yield mock
+
+
+@pytest.mark.usefixtures("call_later")
+class TestTurnOnDynamicPriority:
+    async def test_repeated_turn_on_does_not_raise_priority(self) -> None:
+        """Calling turn_on while already on (e.g. brightness changes) keeps the same priority."""
+        entity = _make_worker_entity()
+
+        priorities = []
+        for _ in range(3):
+            await entity.async_turn_on()
+            await _run_queue(entity)
+            priorities.append(entity._active_sequences["on"].priority)
+
+        assert priorities == [DEFAULT_PRIORITY + 0.5] * 3
+
+    async def test_turn_on_outranks_current_top_notification(self) -> None:
+        entity = _make_worker_entity()
+        entity._active_sequences["alert"] = _alert(DEFAULT_PRIORITY + 100)
+        entity._sort_active_sequences()
+
+        priorities = []
+        for _ in range(2):
+            await entity.async_turn_on()
+            await _run_queue(entity)
+            priorities.append(entity._active_sequences["on"].priority)
+
+        assert priorities == [DEFAULT_PRIORITY + 100.5] * 2
+        assert next(iter(entity._active_sequences)) == "on"
+
+    async def test_turn_on_uses_configured_priority_when_not_dynamic(self) -> None:
+        entity = _make_worker_entity()
+        entity._dynamic_priority = False
+        entity._light_on_priority = 10
+
+        await entity.async_turn_on()
+        await _run_queue(entity)
+
+        assert entity._active_sequences["on"].priority == 10
+
+    async def test_turn_on_overrides_active_peek(self) -> None:
+        """Dynamic turn_on ends a peek and bases light-on on the natural priority."""
+        entity = _make_worker_entity()
+        alert = _alert(DEFAULT_PRIORITY + 100)
+        cancel_restore = MagicMock()
+        alert.start_peek(cancel_restore)
+        entity._active_sequences["alert"] = alert
+        entity._sort_active_sequences()
+
+        await entity.async_turn_on()
+        await _run_queue(entity)
+
+        assert not alert.peeking
+        cancel_restore.assert_called_once()
+        assert entity._active_sequences["on"].priority == DEFAULT_PRIORITY + 100.5
+        assert next(iter(entity._active_sequences)) == "on"
+
+    async def test_non_dynamic_turn_on_leaves_peek_running(self) -> None:
+        entity = _make_worker_entity()
+        entity._dynamic_priority = False
+        alert = _alert(DEFAULT_PRIORITY)
+        alert.start_peek(None)
+        entity._active_sequences["alert"] = alert
+        entity._sort_active_sequences()
+
+        await entity.async_turn_on()
+        await _run_queue(entity)
+
+        assert alert.peeking
+        assert next(iter(entity._active_sequences)) == "alert"
+
+    async def test_toggle_during_peek_shows_light_then_turns_off(self) -> None:
+        entity = _make_worker_entity()
+        await entity.async_turn_on()
+        await _run_queue(entity)
+
+        alert = _alert(DEFAULT_PRIORITY)
+        alert.start_peek(None)
+        entity._active_sequences["alert"] = alert
+        entity._sort_active_sequences()
+
+        await entity.async_toggle()
+        await _run_queue(entity)
+        assert entity.is_on
+        assert next(iter(entity._active_sequences)) == "on"
+
+        await entity.async_toggle()
+        await _run_queue(entity)
+        assert not entity.is_on
+        assert "on" not in entity._active_sequences
+
+    async def test_worker_recomputes_priority_after_queued_adds(self) -> None:
+        """A notification queued just before turn_on is counted once the worker runs."""
+        entity = _make_worker_entity()
+
+        # Both are queued before the worker processes either one.
+        await entity._add_sequence("alert", _alert(DEFAULT_PRIORITY + 100, peek_enabled=False))
+        await entity.async_turn_on()
+        await _run_queue(entity)
+
+        assert next(iter(entity._active_sequences)) == "on"
+        assert entity._active_sequences["on"].priority == DEFAULT_PRIORITY + 100.5
+
+
+class TestPeek:
+    async def _add(self, entity: NotificationLightEntity, seq: _NotificationSequence) -> None:
+        await entity._add_sequence(seq.notify_id, seq)
+        await _run_queue(entity)
+
+    @pytest.mark.parametrize("priority", [DEFAULT_PRIORITY - 1, DEFAULT_PRIORITY])
+    async def test_new_notification_at_or_below_top_peeks(self, call_later, priority) -> None:
+        """A peek-enabled notification always shows immediately, ties included."""
+        entity = _make_worker_entity()
+        await self._add(entity, _alert(DEFAULT_PRIORITY, "first", peek_enabled=False))
+
+        new = _alert(priority, "new")
+        await self._add(entity, new)
+
+        assert new.peeking
+        assert next(iter(entity._active_sequences)) == "new"
+        call_later.assert_called_once()
+
+    async def test_new_top_priority_does_not_peek(self, call_later) -> None:
+        entity = _make_worker_entity()
+        await self._add(entity, _alert(DEFAULT_PRIORITY, "first", peek_enabled=False))
+
+        new = _alert(DEFAULT_PRIORITY + 1, "new")
+        await self._add(entity, new)
+
+        assert not new.peeking
+        call_later.assert_not_called()
+
+    async def test_peek_expiry_restores_natural_order(self, call_later) -> None:
+        entity = _make_worker_entity()
+        await self._add(entity, _alert(DEFAULT_PRIORITY, "first", peek_enabled=False))
+        new = _alert(DEFAULT_PRIORITY - 1, "new")
+        await self._add(entity, new)
+
+        restore = call_later.call_args.args[2]
+        await restore(None)
+
+        assert not new.peeking
+        assert next(iter(entity._active_sequences)) == "first"
+        assert "peek expired" in entity._task_queue.get_nowait().log_trigger
+
+    async def test_removal_cancels_pending_restore(self, call_later) -> None:
+        """A re-enabled notification isn't cut short by the old peek's timer."""
+        entity = _make_worker_entity()
+        await self._add(entity, _alert(DEFAULT_PRIORITY, "first", peek_enabled=False))
+        old = _alert(DEFAULT_PRIORITY - 1, "new")
+        await self._add(entity, old)
+        await entity._remove_sequence("new")
+        await _run_queue(entity)
+
+        assert not old.peeking
+        call_later.cancels[0].assert_called_once()
+        assert "new" not in entity._active_sequences
+
+        # Firing the stale timer must not touch the re-added notification.
+        stale_restore = call_later.call_args.args[2]
+        readded = _alert(DEFAULT_PRIORITY - 1, "new")
+        await self._add(entity, readded)
+        await stale_restore(None)
+
+        assert readded.peeking
+
+    async def test_readd_while_peeking_compares_against_others(self, call_later) -> None:
+        """Re-adding a peeking notification ignores its own old copy when deciding to peek."""
+        entity = _make_worker_entity()
+        await self._add(entity, _alert(10, "b", peek_enabled=False))
+        await self._add(entity, _alert(3, "a"))
+
+        readded = _alert(5, "a")
+        await self._add(entity, readded)
+
+        assert readded.peeking
+        assert next(iter(entity._active_sequences)) == "a"
+
+    async def test_readd_alone_does_not_peek_against_itself(self, call_later) -> None:
+        entity = _make_worker_entity()
+        await self._add(entity, _alert(DEFAULT_PRIORITY, "a"))
+
+        readded = _alert(DEFAULT_PRIORITY, "a")
+        await self._add(entity, readded)
+
+        assert not readded.peeking
+
+    async def test_readd_stops_old_animation(self, call_later) -> None:
+        """The replacement must not be skipped because the old copy is still running."""
+        entity = _make_worker_entity()
+        old = _alert(DEFAULT_PRIORITY, "a")
+        await self._add(entity, old)
+        old.stop = AsyncMock()
+        entity._running_sequences["a"] = old
+
+        await self._add(entity, _alert(DEFAULT_PRIORITY, "a"))
+
+        old.stop.assert_awaited_once()
+        assert "a" not in entity._running_sequences
+
+    async def test_removal_from_hass_cancels_peek_timers(self, call_later) -> None:
+        entity = _make_worker_entity()
+        await self._add(entity, _alert(DEFAULT_PRIORITY, "first", peek_enabled=False))
+        new = _alert(DEFAULT_PRIORITY - 1, "new")
+        await self._add(entity, new)
+
+        await entity.async_will_remove_from_hass()
+
+        assert not new.peeking
+        call_later.cancels[0].assert_called_once()
+
+
+@pytest.mark.usefixtures("call_later")
+class TestToggleBeforeWorkerCatchesUp:
+    async def test_double_toggle_ends_off(self) -> None:
+        """Two toggles queued before the worker runs turn the light on, then off."""
+        entity = _make_worker_entity()
+        entity._active_sequences["alert"] = _alert(DEFAULT_PRIORITY + 100)
+        entity._sort_active_sequences()
+
+        await entity.async_toggle()
+        await entity.async_toggle()
+        await _run_queue(entity)
+
+        assert not entity.is_on
+        assert "on" not in entity._active_sequences

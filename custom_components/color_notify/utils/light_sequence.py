@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import asyncio
+import contextlib
 from copy import copy
 from dataclasses import dataclass, field, replace
 import json
@@ -49,6 +50,7 @@ class ColorInfo:
 
         return params
 
+
 class LightSequence:
     """Handle cycling through sequences of colors."""
 
@@ -73,8 +75,15 @@ class LightSequence:
         self._steps.append(step)
 
     @staticmethod
-    def create_from_pattern(pattern: list[str | ColorInfo]) -> LightSequence:
-        """Create a LightSequence from a supplied pattern."""
+    def create_from_pattern(
+        pattern: list[str | ColorInfo], strict: bool = True
+    ) -> LightSequence:
+        """Create a LightSequence from a supplied pattern.
+
+        strict=False also accepts the looser syntax older versions allowed (e.g.
+        '], -1' to loop forever), so patterns saved before validation tightened
+        keep playing. The config flow uses strict so re-saving asks for a fix.
+        """
         new_sequence: LightSequence = LightSequence()
         initial_color: ColorInfo | None = None
         next_loop_id: int = 1
@@ -91,14 +100,24 @@ class LightSequence:
                     loop_stack.append(next_loop_id)
                     next_loop_id += 1
                 elif item.startswith("]"):
-                    with_iter_cnt = item.split(",")
-                    if len(with_iter_cnt) == 2:
-                        iter_cnt = int(with_iter_cnt[1])
-                    else:
+                    # ']' loops forever; '], N' repeats the loop body N more times.
+                    rest = item[1:].strip()
+                    count_txt = rest.removeprefix(",").strip()
+                    if not rest:
                         iter_cnt = -1
+                    elif rest.startswith(",") and count_txt.isdecimal():
+                        iter_cnt = int(count_txt)
+                    elif not strict and (legacy := _legacy_loop_count(item)) is not None:
+                        iter_cnt = legacy
+                    else:
+                        raise Exception(
+                            f"Error in entry #{idx+1}: loop count must be a"
+                            f" non-negative integer (e.g. '], 2'), got '{item}'."
+                            " To loop forever, use ']' with no count."
+                        )
+                    if iter_cnt < 0:
                         new_sequence._loops_forever = True
 
-                    iter_cnt = int(with_iter_cnt[1]) if len(with_iter_cnt) == 2 else -1
                     if len(loop_stack) == 0:
                         raise Exception(
                             f"Loop close in entry #{idx+1} with no open loop!"
@@ -109,7 +128,34 @@ class LightSequence:
                     try:
                         json_txt = f"{{{item.strip().strip('{}')}}}"  # Strip and re-add curly braces
                         item_dict = json.loads(json_txt)
-                        rgb = item_dict.get(ATTR_RGB_COLOR, item_dict[CONF_RGB])
+                        # Accept either 'rgb_color' or 'rgb'. Only fall back to 'rgb'
+                        # when 'rgb_color' is absent, so 'rgb' isn't required.
+                        if ATTR_RGB_COLOR in item_dict:
+                            rgb = item_dict[ATTR_RGB_COLOR]
+                        elif CONF_RGB in item_dict:
+                            rgb = item_dict[CONF_RGB]
+                        else:
+                            raise ValueError(
+                                f"missing color: provide '{ATTR_RGB_COLOR}' or '{CONF_RGB}'"
+                            )
+                        # Same shape HA's rgb_color accepts: 3 numbers, 0-255.
+                        if (
+                            not isinstance(rgb, list)
+                            or len(rgb) != 3
+                            or any(
+                                isinstance(c, bool)
+                                or not isinstance(c, (int, float))
+                                or not 0 <= c <= 255
+                                for c in rgb
+                            )
+                        ):
+                            raise ValueError(
+                                "color must be 3 numbers from 0 to 255"
+                                f" (e.g. [255, 0, 0]), got {rgb!r}"
+                            )
+                        # JSON yields lists; store a tuple so it compares equal to
+                        # tuple constants such as OFF_RGB.
+                        rgb = tuple(rgb)
 
                         raw_transition = item_dict.get(ATTR_TRANSITION)
 
@@ -127,13 +173,15 @@ class LightSequence:
                         else:
                             transition = float(raw_transition)
 
+                        delay = _parse_delay(item_dict.get(CONF_DELAY), strict)
+
                     except Exception as e:
                         raise Exception(f"Error in entry #{idx+1}: {str(e)}")
                     color = ColorInfo(rgb=rgb, transition=transition)
                     if initial_color is None:
                         initial_color = color
                     new_sequence._addStep(_StepSetColor(color))
-                    if delay := item_dict.get(CONF_DELAY):
+                    if delay:
                         new_sequence._addStep(_StepDelay(delay))
         new_sequence._workspace.color = initial_color or ColorInfo(OFF_RGB, 0)
         if len(loop_stack) > 0:
@@ -156,6 +204,38 @@ class LightSequence:
     def color(self, value: ColorInfo) -> None:
         """Override this sequence's current color."""
         self._workspace.color = value
+
+
+def _legacy_loop_count(item: str) -> int | None:
+    """Parse a loop close the way older versions did, or None if they rejected it."""
+    parts = item.split(",")
+    if len(parts) != 2:
+        return -1  # e.g. ']x' or '], 2, 3' used to loop forever
+    try:
+        return int(parts[1])  # negative (e.g. '], -1') loops forever
+    except ValueError:
+        return None
+
+
+def _parse_delay(raw_delay: Any, strict: bool) -> float | None:
+    """Return a step's delay in seconds, or None for no delay."""
+    if raw_delay is None:
+        return None
+    if not strict and isinstance(raw_delay, str):
+        # Older versions accepted quoted numbers here (then crashed playing them).
+        with contextlib.suppress(ValueError):
+            raw_delay = float(raw_delay)
+    if (
+        isinstance(raw_delay, bool)
+        or not isinstance(raw_delay, (int, float))
+        or not math.isfinite(raw_delay)
+        or raw_delay < 0
+    ):
+        raise ValueError(
+            "'delay' must be a finite, non-negative number of seconds"
+            f" without quotes (e.g. \"delay\": 1), got {raw_delay!r}"
+        )
+    return float(raw_delay)
 
 
 @dataclass

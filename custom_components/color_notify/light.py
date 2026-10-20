@@ -164,14 +164,39 @@ class _NotificationSequence:
         self._step_finished: asyncio.Event = asyncio.Event()
         self._step_finished.set()
         self._initial_hold_sec: float = 0.0
+        self._peeking: bool = False
+        self._peek_canceler: Callable | None = None
         self.reset()  # Set initial color from pattern
 
     def __repr__(self) -> str:
-        return f"Animation Pri: {self.priority} Sequence: {self._sequence}"
+        return f"Animation Pri: {self.effective_priority} Sequence: {self._sequence}"
 
     @property
     def peek_enabled(self) -> bool:
         return self._peek_enabled
+
+    @property
+    def peeking(self) -> bool:
+        """Return if this sequence is temporarily boosted by a peek."""
+        return self._peeking
+
+    @property
+    def effective_priority(self) -> float:
+        """Return the priority used for ordering, including any peek boost."""
+        return self.priority + MAXIMUM_PRIORITY if self._peeking else self.priority
+
+    def start_peek(self, canceler: Callable | None) -> None:
+        """Boost above every natural priority until end_peek (or canceler fires)."""
+        self.end_peek()
+        self._peeking = True
+        self._peek_canceler = canceler
+
+    def end_peek(self) -> None:
+        """Drop any peek boost and cancel its pending restore."""
+        if self._peek_canceler is not None:
+            self._peek_canceler()
+            self._peek_canceler = None
+        self._peeking = False
 
     @property
     def color(self) -> ColorInfo:
@@ -186,7 +211,10 @@ class _NotificationSequence:
 
     def reset(self):
         """Resets the notification sequence to the beginning"""
-        self._sequence: LightSequence = LightSequence.create_from_pattern(self._pattern)
+        # Lenient: patterns saved by older versions must keep playing.
+        self._sequence: LightSequence = LightSequence.create_from_pattern(
+            self._pattern, strict=False
+        )
         self._color: ColorInfo = (
             self._sequence.color
             if self._sequence.color is not None
@@ -321,6 +349,9 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             config_entry.data.get(CONF_RGB_SELECTOR, WARM_WHITE_RGB)
         )
         self._last_brightness: int = 255
+        # Light-on adds queued but not yet processed by the worker, so toggle
+        # doesn't act on a top-sequence list that hasn't caught up.
+        self._light_on_pending: int = 0
 
     async def async_added_to_hass(self):
         """Set up before initially adding to HASS."""
@@ -429,6 +460,10 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         if self._task:
             self._task.cancel()
 
+        # Cancel pending peek-restore timers so they don't fire on this dead entity.
+        for sequence in self._active_sequences.values():
+            sequence.end_peek()
+
         # Unsubscribe any 'pool' subscriptions
 
         pool_subs: list[str] = self._config_entry.options.get(TYPE_POOL, [])
@@ -453,7 +488,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         self._active_sequences = dict(
             sorted(
                 self._active_sequences.items(),
-                key=lambda item: -item[1].priority,
+                key=lambda item: -item[1].effective_priority,
             )
         )
 
@@ -461,11 +496,11 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
     def _get_top_sequences(self) -> list[_NotificationSequence]:
         """Return the list of top priority active sequences."""
         ret: list[_NotificationSequence] = []
-        top_prio: int = 0
+        top_prio: float = 0
         for sequence in self._active_sequences.values():
-            if sequence.priority < top_prio:
+            if sequence.effective_priority < top_prio:
                 break
-            top_prio = sequence.priority
+            top_prio = sequence.effective_priority
             ret.append(sequence)
         return ret
 
@@ -474,7 +509,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         top_sequences: list[_NotificationSequence] = self._get_top_sequences()
         if len(top_sequences) > 0:
             top_sequence = top_sequences[0]
-            top_priority = top_sequence.priority
+            top_priority = top_sequence.effective_priority
 
             # Log the notification event with the current display state.
             self._log_display_state(top_sequences, log_trigger)
@@ -498,7 +533,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
                 notify_id: anim
                 for notify_id, anim in self._running_sequences.items()
                 if notify_id not in self._active_sequences
-                or (anim is not None and anim.priority < top_priority)
+                or (anim is not None and anim.effective_priority < top_priority)
             }
 
             # Stop animations that are lower priority than the current
@@ -599,26 +634,48 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
                 if item.action == CONF_DELETE:
                     if item.notify_id in self._active_sequences:
                         anim = self._active_sequences.pop(item.notify_id)
+                        anim.end_peek()
                         if item.notify_id in self._running_sequences:
                             await anim.stop()
                             self._running_sequences.pop(item.notify_id)
 
                 if item.action == CONF_ADD and item.sequence:
-                    if item.notify_id in self._active_sequences:
+                    if (old := self._active_sequences.get(item.notify_id)) is not None:
                         _LOGGER.warning("%s already in active list", item.notify_id)
+                        old.end_peek()
+                        # Stop the old animation so the replacement gets started
+                        # instead of being skipped as already running.
+                        if item.notify_id in self._running_sequences:
+                            await self._running_sequences.pop(item.notify_id).stop()
 
-                    # Temporarily give high priority for peeks, but only when
-                    # needed: skip the boost when this notification's natural
-                    # priority is already at or above the current top, so it
-                    # would show without any boost.
-                    # _active_sequences is kept sorted descending, so the first
-                    # value is always the current top priority.
-                    current_top_priority = next(
-                        iter(self._active_sequences.values())
-                    ).priority
-                    # Strict less-than: a tie means the new notification
-                    # joins the existing same-priority rotation rather than
-                    # peeking in front of it.
+                    if item.notify_id == STATE_ON:
+                        self._light_on_pending = max(0, self._light_on_pending - 1)
+                        if self._dynamic_priority:
+                            # Turning the light on overrides everything showing,
+                            # including notifications that are only peeking.
+                            for seq in self._active_sequences.values():
+                                seq.end_peek()
+                        # Recompute against the list as it is now, after every
+                        # add/remove queued ahead of this turn_on has been applied.
+                        item.sequence.priority = self._light_on_effective_priority()
+
+                    # A new notification with peek enabled always shows
+                    # immediately, then drops into the normal priority
+                    # rotation. Skip the boost only when its natural priority
+                    # is strictly above the current top, so it shows anyway.
+                    # A tie still peeks, so it shows first instead of waiting
+                    # its turn in the same-priority rotation.
+                    # Compare against everything else; the list isn't re-sorted
+                    # after the end_peek calls above, and any old copy of this
+                    # notification is about to be replaced.
+                    current_top_priority = max(
+                        (
+                            seq.effective_priority
+                            for notify_id, seq in self._active_sequences.items()
+                            if notify_id != item.notify_id
+                        ),
+                        default=0,
+                    )
                     if (
                         peek_duration > 0
                         and item.sequence.peek_enabled
@@ -629,36 +686,35 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
                             item.sequence.clear_delay == 0
                             and not item.sequence.loops_forever
                         )
-                        original_priority = item.sequence.priority
-                        item.sequence.priority += MAXIMUM_PRIORITY
+                        canceler: Callable | None = None
+                        if not auto_clears:
+                            async def restore_priority(_, sequence=item.sequence):
+                                # Drop the boost and wake the event loop to resort the notifications
+                                if not sequence.peeking:
+                                    return
+                                sequence.end_peek()
+                                _LOGGER.debug(
+                                    "Restoring %s priority to %d",
+                                    sequence.notify_id,
+                                    sequence.priority,
+                                )
+                                self._sort_active_sequences()
+                                trigger = (
+                                    f"{self._friendly_name(sequence.notify_id)}"
+                                    f" (pri {sequence.priority}) peek expired"
+                                )
+                                await self._wake_loop(log_trigger=trigger)
+
+                            canceler = async_call_later(
+                                self.hass, peek_duration, restore_priority
+                            )
+                        item.sequence.start_peek(canceler)
                         _LOGGER.debug(
                             "Boosting %s priority to %d for %f seconds",
                             item.notify_id,
-                            item.sequence.priority,
+                            item.sequence.effective_priority,
                             peek_duration,
                         )
-                        if not auto_clears:
-                            async def restore_priority(
-                                _,
-                                priority=original_priority,
-                                notify_id=item.notify_id,
-                            ):
-                                # Restore the priority and wake the event loop to resort the notifications
-                                sequence = self._active_sequences.get(notify_id)
-                                if sequence is not None:
-                                    sequence.priority = priority
-                                    _LOGGER.debug(
-                                        "Restoring %s priority to %d",
-                                        notify_id,
-                                        sequence.priority,
-                                    )
-                                    self._sort_active_sequences()
-                                    trigger = (
-                                        f"{self._friendly_name(notify_id)}"
-                                        f" (pri {priority}) peek expired"
-                                    )
-                                    await self._wake_loop(log_trigger=trigger)
-                            async_call_later(self.hass, peek_duration, restore_priority)
 
                     # Add the new sequence in, sorted by priority
                     self._active_sequences[item.notify_id] = item.sequence
@@ -670,9 +726,9 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
                     new_dict = {}
                     top_id, top_seq = next(it)
                     if top_id != STATE_OFF:
-                        top_prio = top_seq.priority
+                        top_prio = top_seq.effective_priority
                         for it_id, it_seq in it:
-                            if top_prio > it_seq.priority:
+                            if top_prio > it_seq.effective_priority:
                                 new_dict[top_id] = top_seq
                                 top_prio = -1
                             new_dict[it_id] = it_seq
@@ -767,9 +823,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         elif STATE_ON in top_ids:
             displaying = "Light On"
         else:
-            # Any sequence with priority > MAXIMUM_PRIORITY is showing via a
-            # temporary peek boost rather than its natural priority.
-            is_peek = any(s.priority > MAXIMUM_PRIORITY for s in top_sequences)
+            is_peek = any(s.peeking for s in top_sequences)
             names = ", ".join(
                 self._friendly_name(s.notify_id)
                 for s in top_sequences
@@ -821,9 +875,7 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         else:
             existing_seq = self._active_sequences.get(notify_id)
             if existing_seq is not None:
-                p = existing_seq.priority
-                natural = p - MAXIMUM_PRIORITY if p > MAXIMUM_PRIORITY else p
-                log_trigger = f"{friendly} (pri {natural}) disabled"
+                log_trigger = f"{friendly} (pri {existing_seq.priority}) disabled"
                 await self._remove_sequence(notify_id, log_trigger=log_trigger)
 
     async def _handle_wrapped_light_change(
@@ -869,8 +921,14 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
 
     async def _wrapped_light_turn_on(self, **kwargs: Any) -> bool:
         """Turn on the underlying wrapped light entity."""
-        if kwargs.get(ATTR_RGB_COLOR, []) == OFF_RGB:
-            return await self._wrapped_light_turn_off()
+        if tuple(kwargs.get(ATTR_RGB_COLOR, ())) == OFF_RGB:
+            # Keep any transition so a step to black fades out instead of snapping off.
+            off_kwargs = (
+                {ATTR_TRANSITION: kwargs[ATTR_TRANSITION]}
+                if ATTR_TRANSITION in kwargs
+                else {}
+            )
+            return await self._wrapped_light_turn_off(**off_kwargs)
 
         if not self._wrapped_init_done:
             _LOGGER.warning(
@@ -910,7 +968,9 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         """Turn off the underlying wrapped light entity."""
         if not self._wrapped_init_done:
             return False
-        self._reset_expected_response_timeout()
+        self._reset_expected_response_timeout(
+            extra_sec=kwargs.get(ATTR_TRANSITION) or 0
+        )
         await self.hass.services.async_call(
             Platform.LIGHT,
             SERVICE_TURN_OFF,
@@ -939,6 +999,36 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
             peek_enabled=attributes.get(CONF_PEEK_ENABLED, True),
         )
 
+    def _light_on_effective_priority(self) -> float:
+        """Return the priority the light-on entry should use right now."""
+        # Highest natural priority among everything except the light-on entry
+        # itself, so repeated turn_on calls (e.g. brightness changes) don't keep
+        # stacking +0.5, and a temporary peek boost isn't baked into light-on.
+        top_priority = max(
+            (
+                seq.priority
+                for notify_id, seq in self._active_sequences.items()
+                if notify_id != STATE_ON
+            ),
+            default=None,
+        )
+
+        priority = self._light_on_priority
+        if self._dynamic_priority and top_priority is not None:
+            # Dynamic priority gets 0.5 boost of top priority to ensure light-on always shows.
+            priority = max(priority, top_priority) + 0.5
+
+        _LOGGER.debug(
+            "%s: dynamic_priority=%s, configured_priority=%s, "
+            "top_priority=%s, effective_priority=%s",
+            self.entity_id,
+            self._dynamic_priority,
+            self._light_on_priority,
+            top_priority,
+            priority,
+        )
+        return priority
+
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Handle a turn_on service call."""
         self._attr_is_on = True
@@ -956,31 +1046,15 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
         else:
             rgb = self._last_on_rgb
 
-        priority = self._light_on_priority
-        if self._dynamic_priority:
-            # Dynamic priority gets 0.5 boost of top priority to ensure light-on always shows.
-            priority = max(priority, self._get_top_sequences()[0].priority) + 0.5
-
-        top_sequences = self._get_top_sequences()
-        top_priority = top_sequences[0].priority if top_sequences else None
-
-        _LOGGER.debug(
-            "%s: dynamic_priority=%s, configured_priority=%s, "
-            "top_priority=%s, effective_priority=%s",
-            self.entity_id,
-            self._dynamic_priority,
-            self._light_on_priority,
-            top_priority,
-            priority,
-        )
-
         self._last_on_rgb = rgb
         sequence = _NotificationSequence(
             pattern=[ColorInfo(rgb=rgb)],
-            priority=priority,
+            # Placeholder; the worker sets the real priority when it processes the add.
+            priority=self._light_on_priority,
             notify_id=STATE_ON,
         )
 
+        self._light_on_pending += 1
         await self._add_sequence(STATE_ON, sequence, log_trigger="Light turned on")
         self.async_write_ha_state()
 
@@ -993,8 +1067,10 @@ class NotificationLightEntity(LightEntity, RestoreEntity):
     async def async_toggle(self, **kwargs: Any) -> None:
         """Handle a toggle service call."""
         # Turn 'on' the light if it is off, or if dynamic priority is enabled and 'on' isn't top.
+        # A queued turn_on will put 'on' on top, so treat it as already there.
         if not self.is_on or (
             self._dynamic_priority
+            and not self._light_on_pending
             and self._get_top_sequences()[0].notify_id != STATE_ON
         ):
             await self.async_turn_on(**kwargs)
