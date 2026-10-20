@@ -119,6 +119,10 @@ class TestWheel:
         assert svg.count('r="7"') == 2
         assert 'fill="#000000" stroke' not in svg
 
+    def test_label_is_escaped_and_extends_height(self) -> None:
+        svg = wheel_svg([], 120, "<b>&" + "x" * 50)
+        assert 'height="142"' in svg and "&lt;b&gt;&amp;" in svg and "x" * 30 not in svg
+
     def test_pattern_colors_are_distinct_in_order(self) -> None:
         assert pattern_colors(["[", RED, BLUE, "],3"]) == [(255, 0, 0), (0, 0, 255)]
 
@@ -135,19 +139,41 @@ class TestOverviewMarkdown:
             ]
         )
         lines = md.splitlines()
-        assert lines[0].startswith(f"![Colors in use]({COLOR_WHEEL_URL}?c=")
-        assert decode_colors(lines[0].split("?c=")[1].rstrip(")")) == [(255, 0, 0), (0, 0, 255), (255, 140, 0)]
-        rows = [l for l in lines if l.startswith(f"| ![")]
-        assert rows[0].endswith("| Alarm | Home | 900 |")
-        assert rows[1].endswith("| Door | Home | 10 |")
+        assert lines[0].startswith(f"![All pools]({COLOR_WHEEL_URL}?c=")
+        assert lines[0].count("![") == 1  # one pool: no per-pool wheels
+        colors = re.search(r"\?c=([^&]*)&", lines[0]).group(1)
+        assert decode_colors(colors) == [(255, 0, 0), (0, 0, 255), (255, 140, 0)]
+        assert "**Home** (2 notifications)" in lines
+        rows = [l for l in lines if l.startswith("| ![")]
+        assert rows[0].endswith("| Alarm | 900 |")
+        assert rows[1].endswith("| Door | 10 |")
         assert decode_pattern(re.search(r"\?p=([^)]+)\)", rows[1]).group(1)) == solid_pattern([255, 140, 0])
         assert PATTERN_SWATCH_URL in rows[0]
+
+    def test_grouped_by_pool_with_wheel_each(self) -> None:
+        md = overview_markdown(
+            [
+                self._item("Alarm", pool="home", priority=900, pattern=[RED]),
+                self._item("Bins", pool="Chores", priority=50, pattern=[BLUE]),
+                self._item("Door", pool="home", priority=5, pattern=[BLUE]),
+            ]
+        )
+        lines = md.splitlines()
+        wheels = re.findall(r"!\[([^\]]+)\]\(([^)]+)\)", lines[0])
+        assert [alt for alt, _ in wheels] == ["All pools", "Chores", "home"]
+        assert wheels[1][1].endswith("&s=120&t=Chores")
+        assert decode_colors(re.search(r"\?c=([^&]*)&", wheels[1][1]).group(1)) == [(0, 0, 255)]
+        assert decode_colors(re.search(r"\?c=([^&]*)&", wheels[0][1]).group(1)) == [(0, 0, 255), (255, 0, 0)]
+        chores, home = lines.index("**Chores** (1 notification)"), lines.index("**home** (2 notifications)")
+        assert chores < home
+        assert [l.split(" | ")[1] for l in lines[home:] if l.startswith("| ![")] == ["Alarm", "Door"]
 
     def test_names_cannot_break_the_table(self) -> None:
         md = overview_markdown([self._item("A|B [x]\nC", pool="P|Q")])
         row = md.splitlines()[-1]
-        assert "| A\\|B \\[x\\] C | P\\|Q |" in row
-        assert row.count(" | ") == 3  # still exactly four columns
+        assert "| A\\|B \\[x\\] C |" in row
+        assert row.count(" | ") == 2  # still exactly three columns
+        assert "**P\\|Q** (1 notification)" in md
 
     def test_invalid_pattern_is_still_listed(self) -> None:
         md = overview_markdown([self._item("Broken", pattern=["]"])])

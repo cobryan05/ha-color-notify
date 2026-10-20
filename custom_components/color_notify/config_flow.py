@@ -462,11 +462,14 @@ class PoolOptionsFlowHandler(HassDataOptionsFlow):
     def _all_notifications(self) -> dict[str, dict[str, Any]]:
         """Return every notification in every pool, keyed '<pool entry id>/<uid>'."""
         found: dict[str, dict[str, Any]] = {}
-        for pool_id, pool_info in HassData.get_all_pools(self.hass).items():
-            pool_entry: ConfigEntry = pool_info[CONF_ENTRY]
+        # Read the config entries rather than loaded pools, so disabled or
+        # not-yet-loaded pools are listed too.
+        for pool_entry in self.hass.config_entries.async_entries(DOMAIN):
+            if pool_entry.data.get(CONF_TYPE) != TYPE_POOL:
+                continue
             pool_name = pool_entry.title.removeprefix("[Pool] ")
             for uid, data in pool_entry.options.get(CONF_NTFCTN_ENTRIES, {}).items():
-                found[f"{pool_id}/{uid}"] = {"pool": pool_name, "data": data}
+                found[f"{pool_entry.entry_id}/{uid}"] = {"pool": pool_name, "data": data}
         return dict(
             sorted(
                 found.items(),

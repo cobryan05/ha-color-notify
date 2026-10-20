@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import colorsys
+import html
 import json
 import math
+from urllib.parse import quote
 from collections.abc import Iterable
 from typing import Any
 
@@ -26,6 +28,9 @@ from .light_sequence import ColorInfo, LightSequence
 MAX_PATTERN_ITEMS = 64
 MAX_ENCODED_LEN = 4096
 MAX_WHEEL_COLORS = 256
+MAX_LABEL_LEN = 32
+WHEEL_SIZE = 180
+POOL_WHEEL_SIZE = 120
 
 _DOT = 24  # animated dot diameter
 _STRIP_X = 32  # strip starts after the dot
@@ -179,8 +184,10 @@ def _dot_animation(steps: list[tuple], total: float, loops: bool) -> str:
     )
 
 
-def wheel_svg(colors: list[tuple[int, int, int]], size: int = 180) -> str:
-    """Hue/saturation disk with a dot for each color in use.
+def wheel_svg(
+    colors: list[tuple[int, int, int]], size: int = WHEEL_SIZE, label: str = ""
+) -> str:
+    """Hue/saturation disk with a dot for each color in use, optionally labelled below.
 
     Angle is hue and distance from the center is saturation, so unused hues
     show up as empty sectors. Brightness is ignored; black (off) isn't drawn.
@@ -214,7 +221,23 @@ def wheel_svg(colors: list[tuple[int, int, int]], size: int = 180) -> str:
             ' stroke="#000" stroke-width="2"/>'
             f'<circle cx="{x:.1f}" cy="{y:.1f}" r="8.5" fill="none" stroke="#fff"/>'
         )
-    return _svg(size, size, "".join(body))
+    height = size
+    if label:
+        height += 22
+        body.append(
+            f'<text x="{c}" y="{size + 16}" text-anchor="middle" font-size="14"'
+            f' font-family="sans-serif" fill="{_OUTLINE}">'
+            f"{html.escape(label[:MAX_LABEL_LEN])}</text>"
+        )
+    return _svg(size, height, "".join(body))
+
+
+def wheel_url(colors: list[tuple[int, int, int]], label: str, size: int) -> str:
+    """URL of a labelled wheel image."""
+    return (
+        f"{COLOR_WHEEL_URL}?c={encode_colors(colors)}"
+        f"&s={size}&t={quote(label[:MAX_LABEL_LEN], safe='')}"
+    )
 
 
 def encode_colors(colors: list[tuple[int, int, int]]) -> str:
@@ -239,36 +262,57 @@ def _md_cell(text: Any) -> str:
 
 
 def overview_markdown(notifications: Iterable[dict[str, Any]]) -> str:
-    """Colors-in-use wheel plus a table of notifications ({"pool", "data"} dicts, in order)."""
-    rows: list[str] = []
-    used: dict[tuple, None] = {}
+    """Colors-in-use wheels (all pools, then each pool) plus a table per pool.
+
+    Takes {"pool", "data"} dicts already in display order (highest priority first).
+    """
+    pools: dict[str, list[str]] = {}
+    pool_colors: dict[str, dict[tuple, None]] = {}
     for item in notifications:
         data = item["data"]
+        pool = str(item["pool"])
         pattern = data.get(CONF_NOTIFY_PATTERN) or solid_pattern(
             data.get(CONF_RGB_SELECTOR, WARM_WHITE_RGB)
         )
+        used = pool_colors.setdefault(pool, {})
         try:
             used.update(dict.fromkeys(pattern_colors(pattern)))
         except Exception:  # still listed; its swatch shows the error mark
             pass
         name = _md_cell(data.get(CONF_NAME, ""))
         priority = float(data.get(CONF_PRIORITY, DEFAULT_PRIORITY))
-        rows.append(
+        pools.setdefault(pool, []).append(
             f"| ![{name}]({PATTERN_SWATCH_URL}?p={encode_pattern(pattern)})"
-            f" | {name} | {_md_cell(item['pool'])} | {priority:g} |"
+            f" | {name} | {priority:g} |"
         )
-    if not rows:
+    if not pools:
         return "_No notifications yet. Create one from the pool menu._"
 
-    return "\n".join(
-        [
-            f"![Colors in use]({COLOR_WHEEL_URL}?c={encode_colors(list(used))})",
-            "",
-            "_Colors in use: angle is hue, pale colors sit near the center."
-            " Empty areas are free._",
-            "",
-            "| Preview | Name | Pool | Priority |",
-            "|---|---|---|---|",
-            *rows,
+    pool_names = sorted(pools, key=str.lower)
+    all_colors: dict[tuple, None] = {}
+    for name in pool_names:
+        all_colors.update(pool_colors[name])
+    # Images on one line sit side by side (and wrap on narrow screens).
+    wheels = [f"![All pools]({wheel_url(list(all_colors), 'All pools', WHEEL_SIZE)})"]
+    if len(pool_names) > 1:
+        wheels += [
+            f"![{_md_cell(name)}]({wheel_url(list(pool_colors[name]), name, POOL_WHEEL_SIZE)})"
+            for name in pool_names
         ]
-    )
+    lines = [
+        " ".join(wheels),
+        "",
+        "_Colors in use: angle is hue, pale colors sit near the center."
+        " Empty areas are free._",
+    ]
+    for name in pool_names:
+        count = len(pools[name])
+        lines += [
+            "",
+            f"**{_md_cell(name)}** ({count} notification{'s' if count != 1 else ''})",
+            "",
+            "| Preview | Name | Priority |",
+            "|---|---|---|",
+            *pools[name],
+        ]
+    return "\n".join(lines)

@@ -131,7 +131,7 @@
                     "test_action": "Action",
                     "test_light": "Preview light"
                 },
-                "description": "Every notification in every pool, highest priority first. The dot plays the pattern; the bar shows its steps, wider for longer delays (↻ = loops forever).\n\n{overview}",
+                "description": "Every notification in every pool. The first wheel combines all pools so you can compare them; each pool then gets its own wheel and table, highest priority first. The dot plays the pattern; the bar shows its steps, wider for longer delays (↻ = loops forever).\n\n{overview}",
                 "title": "All notifications"
             },
             "pool_init": {

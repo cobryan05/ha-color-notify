@@ -7,7 +7,14 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 
 from .const import COLOR_WHEEL_URL, DOMAIN, PATTERN_SWATCH_URL
-from .utils.swatch import decode_colors, decode_pattern, error_svg, pattern_svg, wheel_svg
+from .utils.swatch import (
+    WHEEL_SIZE,
+    decode_colors,
+    decode_pattern,
+    error_svg,
+    pattern_svg,
+    wheel_svg,
+)
 
 # Output depends only on the URL, so browsers may cache it freely.
 _HEADERS = {"Cache-Control": "public, max-age=86400"}
@@ -45,6 +52,7 @@ class ColorWheelView(HomeAssistantView):
     async def get(self, request: web.Request) -> web.Response:
         try:
             colors = decode_colors(request.query.get("c", ""))
+            size = min(max(int(request.query.get("s", WHEEL_SIZE)), 60), 360)
         except Exception:
             return web.Response(status=400)
-        return _svg_response(wheel_svg(colors))
+        return _svg_response(wheel_svg(colors, size, request.query.get("t", "")))
