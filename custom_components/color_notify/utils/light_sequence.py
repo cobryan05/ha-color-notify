@@ -190,6 +190,42 @@ class LightSequence:
             )
         return new_sequence
 
+    def preview_timeline(self, max_colors: int = 32) -> PreviewTimeline:
+        """Walk the steps without sleeping and return what would be shown, in order.
+
+        Finite loops are expanded; a forever loop is walked once. Stops after
+        max_colors color changes and marks the timeline truncated.
+        """
+        timeline = PreviewTimeline()
+        loop_counts: dict[int, int] = {}
+        loop_opens: dict[int, int] = {}
+        idx = 0
+        while idx < len(self._steps):
+            step = self._steps[idx]
+            idx += 1
+            if isinstance(step, _StepSetColor):
+                if len(timeline.colors) >= max_colors:
+                    timeline.truncated = True
+                    break
+                timeline.colors.append([replace(step._color), 0.0])
+            elif isinstance(step, _StepDelay):
+                if timeline.colors:
+                    timeline.colors[-1][1] += step._delay
+            elif isinstance(step, _StepOpenLoop):
+                loop_opens.setdefault(step._loop_id, idx)
+            elif isinstance(step, _StepCloseLoop):
+                if step._total_repeats < 0:
+                    timeline.loops_forever = True
+                    break
+                count = loop_counts.get(step._loop_id, 0) + 1
+                if count <= step._total_repeats:
+                    loop_counts[step._loop_id] = count
+                    idx = loop_opens[step._loop_id]
+                else:
+                    loop_counts.pop(step._loop_id, None)
+                    loop_opens.pop(step._loop_id, None)
+        return timeline
+
     @property
     def loops_forever(self) -> bool:
         """Return True if this sequence loops forever."""
@@ -236,6 +272,15 @@ def _parse_delay(raw_delay: Any, strict: bool) -> float | None:
             f" without quotes (e.g. \"delay\": 1), got {raw_delay!r}"
         )
     return float(raw_delay)
+
+
+@dataclass
+class PreviewTimeline:
+    """What a sequence shows over time: [color, seconds held] pairs in order."""
+
+    colors: list[list[Any]] = field(default_factory=list)
+    loops_forever: bool = False  # the walk stopped at a loop that repeats forever
+    truncated: bool = False  # the walk stopped at max_colors
 
 
 @dataclass

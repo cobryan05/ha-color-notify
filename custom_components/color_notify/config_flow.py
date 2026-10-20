@@ -39,6 +39,7 @@ from .const import (
     CONF_DYNAMIC_PRIORITY,
     CONF_ENABLE_EVENT_LOG,
     CONF_ENTRY,
+    CONF_NOTIFICATION,
     CONF_WARMUP_TIME,
     CONF_EXPIRE_ENABLED,
     CONF_NOTIFY_PATTERN,
@@ -61,6 +62,7 @@ from .const import (
 )
 from .utils.hass_data import HassData
 from .utils.light_sequence import LightSequence
+from .utils.swatch import overview_markdown
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -447,12 +449,114 @@ class PoolOptionsFlowHandler(HassDataOptionsFlow):
         return self.async_show_menu(
             step_id="pool_init",
             menu_options=[
+                "notification_overview",
                 "add_notification",
                 "add_notification_sample",
                 "add_notification_copy",
                 "modify_notification_select",
                 "delete_notification",
             ],
+        )
+
+    @callback
+    def _all_notifications(self) -> dict[str, dict[str, Any]]:
+        """Return every notification in every pool, keyed '<pool entry id>/<uid>'."""
+        found: dict[str, dict[str, Any]] = {}
+        for pool_id, pool_info in HassData.get_all_pools(self.hass).items():
+            pool_entry: ConfigEntry = pool_info[CONF_ENTRY]
+            pool_name = pool_entry.title.removeprefix("[Pool] ")
+            for uid, data in pool_entry.options.get(CONF_NTFCTN_ENTRIES, {}).items():
+                found[f"{pool_id}/{uid}"] = {"pool": pool_name, "data": data}
+        return dict(
+            sorted(
+                found.items(),
+                key=lambda item: (
+                    -float(item[1]["data"].get(CONF_PRIORITY, DEFAULT_PRIORITY)),
+                    str(item[1]["data"].get(CONF_NAME, "")).lower(),
+                ),
+            )
+        )
+
+    async def async_step_notification_overview(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show every notification's colors and preview any of them on a light."""
+        notifications = self._all_notifications()
+        errors: dict[str, str] = {}
+        suggested: dict[str, Any] = {CONF_TEST_ACTION: "test"}
+
+        if user_input is not None:
+            test_light, test_action = self._strip_ephemeral_fields(user_input)
+            selected_id = user_input.get(CONF_NOTIFICATION)
+            suggested = {
+                CONF_TEST_ACTION: test_action,
+                **({CONF_NOTIFICATION: selected_id} if selected_id else {}),
+                **({CONF_TEST_LIGHT: test_light} if test_light else {}),
+            }
+            if test_action == "back":
+                await self._stop_active_preview()
+                return await self.async_step_pool_init()
+            if test_action == "stop_preview":
+                await self._stop_active_preview()
+            elif (selected := notifications.get(selected_id or "")) is None:
+                errors[CONF_NOTIFICATION] = "select_notification"
+            elif not test_light:
+                errors[CONF_TEST_LIGHT] = "select_test_light"
+            else:
+                if self._preview_light and self._preview_light != test_light:
+                    await self._stop_active_preview()
+                await self._fire_preview_sequence(test_light, selected["data"])
+                self._preview_light = test_light
+
+        light_ids = HassData.get_domain_light_entity_ids(self.hass)
+        actions = [
+            *(
+                [
+                    selector.SelectOptionDict(
+                        value="test", label="Preview selected notification on selected light"
+                    ),
+                    selector.SelectOptionDict(value="stop_preview", label="Stop preview"),
+                ]
+                if light_ids
+                else []
+            ),
+            selector.SelectOptionDict(value="back", label="Back to pool menu"),
+        ]
+        schema: dict[Any, Any] = {}
+        if light_ids and notifications:
+            schema[vol.Optional(CONF_NOTIFICATION)] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(
+                            value=notify_id,
+                            label=(
+                                f"{item['data'].get(CONF_NAME, '')} ({item['pool']}, priority"
+                                f" {float(item['data'].get(CONF_PRIORITY, DEFAULT_PRIORITY)):g})"
+                            ),
+                        )
+                        for notify_id, item in notifications.items()
+                    ],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
+            schema[vol.Optional(CONF_TEST_LIGHT)] = selector.EntitySelector(
+                selector.EntitySelectorConfig(include_entities=light_ids)
+            )
+        else:
+            suggested[CONF_TEST_ACTION] = "back"
+        schema[vol.Required(CONF_TEST_ACTION)] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=actions, mode=selector.SelectSelectorMode.LIST
+            )
+        )
+
+        return self.async_show_form(
+            step_id="notification_overview",
+            data_schema=self.add_suggested_values_to_schema(
+                vol.Schema(schema), suggested_values=suggested
+            ),
+            errors=errors,
+            description_placeholders={"overview": overview_markdown(notifications.values())},
         )
 
     async def async_step_add_notification(
