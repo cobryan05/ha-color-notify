@@ -3,6 +3,7 @@
   "name": "Color Notify",
   "codeowners": ["@cobryan05"],
   "config_flow": true,
+  "dependencies": ["http"],
   "documentation": "https://github.com/cobryan05/ha-color-notify",
   "integration_type": "hub",
   "iot_class": "calculated",

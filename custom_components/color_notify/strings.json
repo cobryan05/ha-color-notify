@@ -99,12 +99,14 @@
   },
   "options": {
     "error": {
-      "select_test_light": "Select a light to preview the sequence on"
+      "select_test_light": "Select a light to preview the sequence on",
+      "select_notification": "Select a notification to preview"
     },
     "step": {
       "pool_init": {
         "description": "Configure Pool Items",
         "menu_options": {
+          "notification_overview": "View all notifications (colors and patterns)",
           "add_notification": "Create a new notification",
           "add_notification_sample": "Create a new notification (with sample pattern)",
           "add_notification_copy": "Create a new notification (copy an existing)",
@@ -171,6 +173,15 @@
         "data": {
           "pool": "Notification Pools",
           "entities": "Individual Notifications"
+        }
+      },
+      "notification_overview": {
+        "title": "All notifications",
+        "description": "Every notification in every pool. The first wheel combines all pools so you can compare them; each pool then gets its own wheel and table, highest priority first. The dot plays the pattern; the bar shows its steps, wider for longer delays (↻ = loops forever).\n\n{overview}",
+        "data": {
+          "notification": "Notification to preview",
+          "test_light": "Preview light",
+          "test_action": "Action"
         }
       }
     }
