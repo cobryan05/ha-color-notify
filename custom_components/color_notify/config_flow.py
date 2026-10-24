@@ -198,7 +198,7 @@ class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle a flow initialized by the user."""
-        return self.async_show_menu(menu_options=["new_pool", "new_light"])
+        return self.async_show_menu(step_id="user", menu_options=["new_pool", "new_light"])
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
